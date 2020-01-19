@@ -149,17 +149,17 @@ void update_baro_HP206C()
     bar_d.Temper = HP20x.ReadTemperature();
     bar_d.t = bar_d.Temper / 100.0; 
     bar_d.tf = t_filter.Filter(bar_d.t);
-    current_temp_inf = String(bar_d.Temper + "C, " + String(bar_d.tf) + "f_C\n");
+    current_temp_inf = String(bar_d.Temper + "C, " + String(bar_d.tf) + "f_C");
 
     bar_d.Pressure = HP20x.ReadPressure();
     bar_d.p = bar_d.Pressure / 100.0;
     bar_d.pf = p_filter.Filter(bar_d.p);
-    current_pressure_inf = String(bar_d.Pressure + "hPa, " + String(bar_d.pf) + "f_hPa\n");
+    current_pressure_inf = String(bar_d.Pressure + "hPa, " + String(bar_d.pf) + "f_hPa");
 
     bar_d.Altitude = HP20x.ReadAltitude();
     bar_d.a = bar_d.Altitude / 100.0;
     bar_d.af = a_filter.Filter(bar_d.a);
-    current_altitude_inf = String(bar_d.Altitude + "m, " + String(bar_d.af) + "f_m\n");
+    current_altitude_inf = String(bar_d.Altitude + "m, " + String(bar_d.af) + "f_m");
 
     espDelay(200);
   }
@@ -261,23 +261,6 @@ void updateGPSInfo()
   current_gps_time = t;
 }
 
-//void showStrings()
-//{
-//    static uint64_t timeStamp = 0;
-//    if (millis() - timeStamp > 1000) {
-//        timeStamp = millis();
-//        // read GPS value here + baro
-//        Serial.println(msg);
-//        tft.fillScreen(TFT_BLACK);
-//        tft.setTextDatum(MC_DATUM);
-//
-//        int offset = 0;
-//        tft.drawString(gps,  tft.width() / 2, tft.height() + offset++ / 2 );
-//        tft.drawString(altitude,  tft.width() / 2, tft.height() + offset++ / 2 );
-//        tft.drawString(pressure,  tft.width() / 2, tft.height() + offset++ / 2 );
-//    }
-//}
-
 void showTFTMessage(String msg)
 {
     static uint64_t timeStamp = 0;
@@ -331,12 +314,10 @@ void showBaro()
       Serial.println( "showBaro " + info);
       tft.fillScreen(TFT_BLACK);
       tft.setTextDatum(MC_DATUM);
-      tft.drawString(current_pressure_inf,  tft.width() / 2, tft.height() / 2 );
-      tft.drawString(current_altitude_inf,  tft.width() / 2, tft.height() + 3 / 2 );
+      // tft.drawString(current_pressure_inf,  tft.width() / 2, tft.height() / 2 );
+      tft.drawString(current_altitude_inf,  tft.width() / 2, tft.height()  / 2 );
   }
 }
-
-
 
 
 void button_init()
@@ -364,7 +345,8 @@ void button_init()
     btn2.setPressedHandler([](Button2 & b) {
         btnCick = false;
         Serial.println("btn press wifi scan");
-        wifi_scan();
+        // wifi_scan();
+        showBaro();
     });
 }
 
@@ -477,6 +459,8 @@ bool getCurrentGPSInfo()
     espDelay(2000);
     return false;
   }
+
+  return false;
 }
 void setup()
 {
@@ -534,22 +518,20 @@ void setup()
 
 }
 
-
-
 void loop()
 {
     if (btnCick) {
-        //showVoltage();
+        showVoltage();
         // showGPS();
-        showBaro();
+        // showBaro();
 //        showTFTMessage(current_gps_info);
 //        Serial.println(current_gps_info);
         // This sketch displays information every time a new sentence is correctly encoded.
      
     }
-    // getCurrentGPSInfo();
-    i2c_scanner();
-    loop_baro_HP206C();
+    getCurrentGPSInfo();
+    // i2c_scanner();
+    // loop_baro_HP206C();
     button_loop();
    
 }
