@@ -52,19 +52,23 @@ static String current_pressure_inf;
 static String current_temp_inf;
 static String current_altitude_inf;
 
-static struct {
-  long Temper;
-  float t;
-  float tf;
+// static struct {
+//   long Temper;
+//   float t;
+//   float tf;
 
-  long Pressure;
-  float p;
-  float pf;
+//   long Pressure;
+//   float p;
+//   float pf;
 
-  long Altitude;
-  float a;
-  float af;
-} bar_d;
+//   long Altitude;
+//   float a;
+//   float af;
+// } bar_d;
+
+float t, tf;
+float p, pf;
+float a, af;
 
 HP20x_dev HP20x(((uint8_t)2));
 
@@ -139,66 +143,98 @@ void setup_baro_HP206C()
 }
 
 
-void update_baro_HP206C()
-{
+// void update_baro_HP206C()
+// {
 
-  current_pressure_inf = String("no-baro");
-  current_altitude_inf = String("no-alti");
-  if(OK_HP20X_DEV == ret)
-  { 
-    bar_d.Temper = HP20x.ReadTemperature();
-    bar_d.t = bar_d.Temper / 100.0; 
-    bar_d.tf = t_filter.Filter(bar_d.t);
-    current_temp_inf = String(bar_d.Temper + "C, " + String(bar_d.tf) + "f_C");
+//   current_pressure_inf = String("no-baro");
+//   current_altitude_inf = String("no-alti");
+//   if(OK_HP20X_DEV == ret)
+//   { 
+//     bar_d.Temper = HP20x.ReadTemperature();
+//     bar_d.t = bar_d.Temper / 100.0; 
+//     bar_d.tf = t_filter.Filter(bar_d.t);
+//     current_temp_inf = String(bar_d.Temper + "C, " + String(bar_d.tf) + "f_C");
 
-    bar_d.Pressure = HP20x.ReadPressure();
-    bar_d.p = bar_d.Pressure / 100.0;
-    bar_d.pf = p_filter.Filter(bar_d.p);
-    current_pressure_inf = String(bar_d.Pressure + "hPa, " + String(bar_d.pf) + "f_hPa");
+//     bar_d.Pressure = HP20x.ReadPressure();
+//     bar_d.p = bar_d.Pressure / 100.0;
+//     bar_d.pf = p_filter.Filter(bar_d.p);
+//     current_pressure_inf = String(bar_d.Pressure + "hPa, " + String(bar_d.pf) + "f_hPa");
 
-    bar_d.Altitude = HP20x.ReadAltitude();
-    bar_d.a = bar_d.Altitude / 100.0;
-    bar_d.af = a_filter.Filter(bar_d.a);
-    current_altitude_inf = String(bar_d.Altitude + "m, " + String(bar_d.af) + "f_m");
+//     bar_d.Altitude = HP20x.ReadAltitude();
+//     bar_d.a = bar_d.Altitude / 100.0;
+//     bar_d.af = a_filter.Filter(bar_d.a);
+//     current_altitude_inf = String(bar_d.Altitude + "m, " + String(bar_d.af) + "f_m");
 
-    espDelay(200);
-  }
-}
+//     espDelay(200);
+//   }
+// }
+
 void loop_baro_HP206C()
 {
     char display[40];
+    static long Temper = 0;
+    static long Pressure = 0;
+    static long Altitude = 0;
     if(OK_HP20X_DEV == ret)
     { 
-	  Serial.println("------------------\n");
-	  long Temper = HP20x.ReadTemperature();
-	  Serial.println("Temper:");
-	  float t = Temper/100.0;
-	  Serial.print(t);	  
-	  Serial.println("C.\n");
-	  Serial.println("Filter:");
-	  Serial.print(t_filter.Filter(t));
-	  Serial.println("C.\n");
- 
-      long Pressure = HP20x.ReadPressure();
-	  Serial.println("Pressure:");
-	  t = Pressure/100.0;
-	  Serial.print(t);
-	  Serial.println("hPa.\n");
-	  Serial.println("Filter:");
-	  Serial.print(p_filter.Filter(t));
-	  Serial.println("hPa\n");
-	  
-	  long Altitude = HP20x.ReadAltitude();
-	  Serial.println("Altitude:");
-	  t = Altitude/100.0;
-	  Serial.print(t);
-	  Serial.println("m.\n");
-	  Serial.println("Filter:");
-	  Serial.print(a_filter.Filter(t));
-	  Serial.println("m.\n");
-	  Serial.println("------------------\n");
-    espDelay(200);
-    }
+      int cnt = 25;
+      t = 0.0;
+      tf = 0.0;
+      a = 0.0;
+      af = 0.0;
+      p = 0.0;
+      pf = 0.0;
+
+      for (int i = 0; i < cnt; i++)
+      {
+        Temper = 0;
+        Pressure = 0;
+        Altitude = 0;
+        /* code */
+        //Serial.println("------------------\n");
+        Temper = HP20x.ReadTemperature();
+        //Serial.println("Temper:");
+        t += Temper/100.0 / (float)cnt;
+        //Serial.print(t);	  
+        //Serial.println("C.");
+        //Serial.println("Filter:");
+
+        tf += t_filter.Filter(Temper/100.0) / (float)cnt;
+        //Serial.print(tf);
+        //Serial.println("C.");
+    
+        Pressure = HP20x.ReadPressure();
+        //Serial.println("Pressure:");
+        p += Pressure/100.0  / (float)cnt;
+       
+
+        pf += p_filter.Filter(Pressure/100.0)  / (float)cnt;
+     
+        
+        Altitude = HP20x.ReadAltitude();
+        //Serial.println("Altitude:");
+        a += Altitude/100.0  / (float)cnt;
+        af += a_filter.Filter(Altitude/100.0)  / (float)cnt;
+       
+        }
+      }
+
+      Serial.print(p);
+      Serial.println("hPa.");
+      Serial.println("Filter:");
+
+      Serial.print(pf);
+      Serial.println("hPa");
+
+      Serial.print(a);
+      Serial.println("m. af ");
+      Serial.println("Filter:");
+      Serial.print(af);
+      Serial.println("m.");
+      Serial.println("------------------\n");
+      espDelay(200);
+      
+	 
 }
 
 void setup_soft_serial_gps()
@@ -294,31 +330,68 @@ void showGPS()
 {
     static uint64_t timeStamp = 0;
     if (millis() - timeStamp > 1000) {
-        timeStamp = millis();
-        String info = current_gps_pos + " " + current_gps_time;
-        Serial.println("showGPS " + info);
+        timeStamp = millis();       
+        // String info = current_gps_pos + " " + current_gps_time;
+        tft.setTextSize(2);
+        tft.setRotation(1);
+        tft.setCursor(0,0);
         tft.fillScreen(TFT_BLACK);
-        tft.setTextDatum(MC_DATUM);
-        tft.drawString(current_gps_pos,  tft.width() / 2, tft.height() / 2 );
-        tft.drawString(current_gps_time,  tft.width() / 2, tft.height()+ 10 / 2 );
+        tft.setTextDatum(TL_DATUM);
+
+        int16_t wp = tft.width() * 0.1;
+        int16_t yb = tft.height()* 0.1;
+        float vh = 0.0;
+        float vinc = 0.15;
+        if (gps.location.isValid())
+        {
+          tft.drawString("lat:" + String(gps.location.lat(), 4), wp, yb );
+          vh += vinc;
+          tft.drawString("lg:" + String(gps.location.lng(), 4),wp, (int)(yb + tft.height()*vh));
+          vh += vinc;
+          Serial.println("showGPS " +  String(gps.location.lng(), 6));
+        }
+        else
+        {
+          tft.drawString(F("No-FIX"), wp, yb);
+          vh += vinc;
+        }
+
+      String info = String(p, 2) +" hpa   ";
+      // sprintf(info, "%f hpa   ", p);
+      tft.drawString(info, wp, yb + tft.height()* vh);
+       vh += vinc;
+      // sprintf(info, "%f fhpa  ", pf);
+      info = String(pf, 2) +" hpaf   ";
+      tft.drawString(info, wp, (int)(yb + tft.height()* vh));
+      vh += vinc;
+      
+      // sprintf(info, "%f m    ", a);
+      info = String(a, 2) +" m   ";
+      tft.drawString(info, wp, (int)(yb + tft.height()* vh));
+       vh += vinc;
+      // sprintf(info, "%f fm    ", af);
+      info = String(af, 2) +" mf   ";
+      tft.drawString(info, wp, (int)(yb + tft.height()* vh));
+       vh += vinc;
+        
     }
 }
 
 
 void showBaro()
 {
+  // static char info [40];
   static uint64_t timeStamp = 0;
   if (millis() - timeStamp > 1000) {
       timeStamp = millis();
-      String info = current_pressure_inf + " " + current_altitude_inf;
-      Serial.println( "showBaro " + info);
-      tft.fillScreen(TFT_BLACK);
-      tft.setTextDatum(MC_DATUM);
-      // tft.drawString(current_pressure_inf,  tft.width() / 2, tft.height() / 2 );
-      tft.drawString(current_altitude_inf,  tft.width() / 2, tft.height()  / 2 );
+      // String info = current_pressure_inf + " " + current_altitude_inf;
+      // Serial.println( "showBaro " + info);
+      
+
+      // tft.drawString(info,  tft.width() / 2, tft.height() / 2 );
+      // tft.drawString(current_altitude_inf,  tft.width() / 2, tft.height()  / 2 );
   }
 }
-
 
 void button_init()
 {
@@ -346,7 +419,7 @@ void button_init()
         btnCick = false;
         Serial.println("btn press wifi scan");
         // wifi_scan();
-        showBaro();
+        //showBaro();
     });
 }
 
@@ -446,8 +519,7 @@ bool getCurrentGPSInfo()
   {
     if (gps.encode(Serial2.read()))
     {
-      updateGPSInfo();
-      printGPSInfo();
+      // updateGPSInfo();
       return true;
     }
   }
@@ -520,18 +592,23 @@ void setup()
 
 void loop()
 {
-    if (btnCick) {
-        showVoltage();
-        // showGPS();
-        // showBaro();
+    
+
+    getCurrentGPSInfo();
+    // printGPSInfo();
+    // i2c_scanner();
+    loop_baro_HP206C();
+
+    // if (btnCick) {
+      // showVoltage();
+      showGPS();
+      delayMicroseconds(1000000);
+      // showBaro();
 //        showTFTMessage(current_gps_info);
 //        Serial.println(current_gps_info);
-        // This sketch displays information every time a new sentence is correctly encoded.
+      // This sketch displays information every time a new sentence is correctly encoded.
      
-    }
-    getCurrentGPSInfo();
-    // i2c_scanner();
-    // loop_baro_HP206C();
-    button_loop();
+    // }
+    // button_loop();
    
 }
