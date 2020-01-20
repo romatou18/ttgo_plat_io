@@ -44,15 +44,13 @@ KalmanFilter a_filter;    //altitude filter
 #define BUTTON_1        35
 #define BUTTON_2        0
 
+TaskHandle_t Task1;
+TaskHandle_t Task2;
+
 static const int RXPin = 38, TXPin = 37;
 static const uint32_t GPSBaud = 9600;
-static String current_gps_time;
-static String current_gps_pos;
-static String current_gps_lat;
-static String current_gps_lng;
-static String current_pressure_inf;
-static String current_temp_inf;
-static String current_altitude_inf;
+static volatile float current_gps_lat =0.0;
+static volatile float current_gps_lng =0.0;
 
 // static struct {
 //   long Temper;
@@ -171,12 +169,13 @@ void setup_baro_HP206C()
 //   }
 // }
 
-void loop_baro_HP206C()
+void loop_baro_HP206C(void* param)
 {
     char display[40];
     static long Temper = 0;
     static long Pressure = 0;
     static long Altitude = 0;
+  for(;;){
     if(OK_HP20X_DEV == ret)
     { 
       int cnt = 25;
@@ -209,7 +208,6 @@ void loop_baro_HP206C()
         //Serial.println("Pressure:");
         p += Pressure/100.0  / (float)cnt;
        
-
         pf += p_filter.Filter(Pressure/100.0)  / (float)cnt;
      
         
@@ -235,18 +233,20 @@ void loop_baro_HP206C()
       Serial.println("m.");
       Serial.println("------------------\n");
       espDelay(200);
-      
+  }
 	 
 }
 
 void setup_soft_serial_gps()
 {
+  Serial.print("setup_soft_serial_gps() running on core ");
+  Serial.println(xPortGetCoreID());
   // Open serial communications and wait for port to open:
 //  gps_serial.begin(GPSBaud, SWSERIAL_8N1, RXPin, TXPin, false, 95, 11); // RX, TX GPS
   Serial2.begin(GPSBaud,SERIAL_8N1, RXPin, TXPin);    //Baud rate, parity mode, RX, TX
 
   Serial.println(" GPS serial init success");
-  delayMicroseconds(2000); 
+  espDelay(1000); 
 }
 
 //! Long time delay, it is recommended to use shallow sleep, which can effectively reduce the current consumption
@@ -255,52 +255,6 @@ void espDelay(int ms)
     esp_sleep_enable_timer_wakeup(ms * 1000);
     esp_sleep_pd_config(ESP_PD_DOMAIN_RTC_PERIPH,ESP_PD_OPTION_ON);
     esp_light_sleep_start();
-}
-
-void updateGPSInfo()
-{
-  String s = String("Pos: ");
-  if (gps.location.isValid())
-  {
-    current_gps_lat = String("Lat:") + String(gps.location.lat(), 6);
-    // s += F(",");
-    current_gps_lng = String("Long:") + String(gps.location.lat(), 6);
-    // s += String(gps.location.lng(), 6);
-  }
-  else
-  {
-    // s += F("No-GPS-signal");
-     current_gps_lat = String("Lat: no-signal");
-    // s += F(",");
-    current_gps_lng = String("Long: no-signal");
-  }
-
-  // current_gps_pos = s;
-
-  String t = "";
-  if (gps.time.isValid())
-  {
-    if (gps.time.hour() < 10) t += F("0");
-    t += gps.time.hour();
-    t += F(":");
-    if (gps.time.minute() < 10) t += F("0");
-    t += gps.time.minute();
-    t += F(":");
-    if (gps.time.second() < 10) t += F("0");
-    t += gps.time.second();
-    t += F(".");
-    if (gps.time.centisecond() < 10) 
-    {
-      t += F("0");
-    }
-    t += gps.time.centisecond();
-  }
-  else
-  {
-    t += F("no-time");
-  }
-
-  current_gps_time = t;
 }
 
 void showVoltage()
@@ -482,92 +436,122 @@ void printGPSInfo()
   Serial.println();
 }
 
-bool getCurrentGPSInfo()
+void getCurrentGPSInfo(void * pvParameters)
 {
-  if (Serial2.available() > 0)
-  {
-    if (gps.encode(Serial2.read()))
+  Serial.print("updateGPSInfo() running on core ");
+  Serial.println(xPortGetCoreID());
+  for(;;){
+    if (Serial2.available() > 0)
     {
-      printGPSInfo();
-      updateGPSInfo();
-      return true;
+      if (gps.encode(Serial2.read()))
+      {
+        if (gps.location.isValid())
+        {
+          current_gps_lat = gps.location.lat();
+          // s += F(",");
+          current_gps_lng = gps.location.lat();
+          // s += String(gps.location.lng(), 6);
+        }
+        else
+        {
+          // s += F("No-GPS-signal");
+          current_gps_lat =0.0;
+          // s += F(",");
+          current_gps_lng = 0.0;
+        }
+        printGPSInfo();
+      }
+    }
+      
+    if (millis() > 5000 && gps.charsProcessed() < 10)
+    {
+      Serial.println(F("No GPS detected: check wiring."));
+  //    showTFTMessage("No GPS detected: check wiring.");
+      espDelay(500);
     }
   }
-    
-  if (millis() > 5000 && gps.charsProcessed() < 10)
-  {
-    Serial.println(F("No GPS detected: check wiring."));
-//    showTFTMessage("No GPS detected: check wiring.");
-    espDelay(500);
-    return false;
-  }
 
-  return false;
+  showGPS();
+  espDelay(50);
 }
+
 void setup()
 {
-    Serial.begin(115200);
-    Serial.println("Start");
-    setup_soft_serial_gps();
-    setup_baro_HP206C(); 
+  Serial.begin(115200);
+  Serial.println("Start");
 
-    tft.init();
-    tft.setRotation(3);
-    tft.fillScreen(TFT_BLACK);
-    tft.setTextSize(2);
-    tft.setTextColor(TFT_WHITE);
-    tft.setCursor(0, 0);
-    tft.setTextDatum(MC_DATUM);
 
-    tft.setTextSize(1);
+  espDelay(500); 
+  setup_soft_serial_gps();
+  setup_baro_HP206C(); 
 
-    current_gps_pos = String("no-gps");
-    current_gps_time = String("no-gps");
-    current_gps_lat = String("");
-    current_gps_lng = String("");
-    current_pressure_inf = String("no-baro");
-    current_altitude_inf = String("no-alti");
+  tft.init();
+  tft.setRotation(3);
+  tft.fillScreen(TFT_BLACK);
+  tft.setTextSize(2);
+  tft.setTextColor(TFT_WHITE);
+  tft.setCursor(0, 0);
+  tft.setTextDatum(MC_DATUM);
 
-    if (TFT_BL > 0) { // TFT_BL has been set in the TFT_eSPI library in the User Setup file TTGO_T_Display.h
-         pinMode(TFT_BL, OUTPUT); // Set backlight pin to output mode
-         digitalWrite(TFT_BL, TFT_BACKLIGHT_ON); // Turn backlight on. TFT_BACKLIGHT_ON has been set in the TFT_eSPI library in the User Setup file TTGO_T_Display.h
-    }
+  tft.setTextSize(1);
 
-    tft.setSwapBytes(true);
-    tft.pushImage(0, 0,  240, 135, kitetrack242r);
-    espDelay(5000);
+  if (TFT_BL > 0) { // TFT_BL has been set in the TFT_eSPI library in the User Setup file TTGO_T_Display.h
+        pinMode(TFT_BL, OUTPUT); // Set backlight pin to output mode
+        digitalWrite(TFT_BL, TFT_BACKLIGHT_ON); // Turn backlight on. TFT_BACKLIGHT_ON has been set in the TFT_eSPI library in the User Setup file TTGO_T_Display.h
+  }
 
-    tft.setRotation(0);
-    button_init();
+  tft.setSwapBytes(true);
+  tft.pushImage(0, 0,  240, 135, kitetrack242r);
+  espDelay(5000);
 
-    esp_adc_cal_characteristics_t adc_chars;
-    esp_adc_cal_value_t val_type = esp_adc_cal_characterize((adc_unit_t)ADC_UNIT_1, (adc_atten_t)ADC1_CHANNEL_6, (adc_bits_width_t)ADC_WIDTH_BIT_12, 1100, &adc_chars);
-    //Check type of calibration value used to characterize ADC
-    if (val_type == ESP_ADC_CAL_VAL_EFUSE_VREF) {
-        Serial.printf("eFuse Vref:%u mV", adc_chars.vref);
-        vref = adc_chars.vref;
-    } else if (val_type == ESP_ADC_CAL_VAL_EFUSE_TP) {
-        Serial.printf("Two Point --> coeff_a:%umV coeff_b:%umV\n", adc_chars.coeff_a, adc_chars.coeff_b);
-    } else {
-        Serial.println("Default Vref: 1100mV");
-    }
+  tft.setRotation(0);
+  button_init();
+
+  esp_adc_cal_characteristics_t adc_chars;
+  esp_adc_cal_value_t val_type = esp_adc_cal_characterize((adc_unit_t)ADC_UNIT_1, (adc_atten_t)ADC1_CHANNEL_6, (adc_bits_width_t)ADC_WIDTH_BIT_12, 1100, &adc_chars);
+  //Check type of calibration value used to characterize ADC
+  if (val_type == ESP_ADC_CAL_VAL_EFUSE_VREF) {
+      Serial.printf("eFuse Vref:%u mV", adc_chars.vref);
+      vref = adc_chars.vref;
+  } else if (val_type == ESP_ADC_CAL_VAL_EFUSE_TP) {
+      Serial.printf("Two Point --> coeff_a:%umV coeff_b:%umV\n", adc_chars.coeff_a, adc_chars.coeff_b);
+  } else {
+      Serial.println("Default Vref: 1100mV");
+  }
+
+     //create a task that will be executed in the Task1code() function, with priority 1 and executed on core 0
+  xTaskCreatePinnedToCore(
+                    getCurrentGPSInfo,   /* Task function. */
+                    "Task1GPS",     /* name of task. */
+                    10000,       /* Stack size of task */
+                    NULL,        /* parameter of the task */
+                    1,           /* priority of the task */
+                    &Task1,      /* Task handle to keep track of created task */
+                    1);          /* pin task to core 0 */                  
+  espDelay(500); 
+
+  xTaskCreatePinnedToCore(
+                    loop_baro_HP206C,   /* Task function. */
+                    "Task2Baro",     /* name of task. */
+                    10000,       /* Stack size of task */
+                    NULL,        /* parameter of the task */
+                    0,           /* priority of the task */
+                    &Task2,      /* Task handle to keep track of created task */
+                    0);          /* pin task to core 1 */
 
 }
 
 void loop()
 {
     
-
-   
     // i2c_scanner();
-    loop_baro_HP206C();
-    getCurrentGPSInfo();
-    printGPSInfo();
+    // loop_baro_HP206C();
+    // getCurrentGPSInfo();
+
 
     // if (btnCick) {
       // showVoltage();
-      showGPS();
-    espDelay(100);
+     
       // showBaro();
 //        showTFTMessage(current_gps_info);
 //        Serial.println(current_gps_info);
