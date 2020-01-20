@@ -48,6 +48,8 @@ static const int RXPin = 38, TXPin = 37;
 static const uint32_t GPSBaud = 9600;
 static String current_gps_time;
 static String current_gps_pos;
+static String current_gps_lat;
+static String current_gps_lng;
 static String current_pressure_inf;
 static String current_temp_inf;
 static String current_altitude_inf;
@@ -70,7 +72,7 @@ float t, tf;
 float p, pf;
 float a, af;
 
-HP20x_dev HP20x(((uint8_t)2));
+HP20x_dev HP20x(((uint8_t)1));
 
 // configuring GPIOS to Serial tx RX
 //SoftwareSerial gps_serial;
@@ -257,19 +259,23 @@ void espDelay(int ms)
 
 void updateGPSInfo()
 {
-  String s = String("");
+  String s = String("Pos: ");
   if (gps.location.isValid())
   {
-    s += String(gps.location.lat(), 6);
-    s += F(",");
-    s += String(gps.location.lng(), 6);
+    current_gps_lat = String("Lat:") + String(gps.location.lat(), 6);
+    // s += F(",");
+    current_gps_lng = String("Long:") + String(gps.location.lat(), 6);
+    // s += String(gps.location.lng(), 6);
   }
   else
   {
-    s += F("No-FIX");
+    // s += F("No-GPS-signal");
+     current_gps_lat = String("Lat: no-signal");
+    // s += F(",");
+    current_gps_lng = String("Long: no-signal");
   }
 
-  current_gps_pos = s;
+  // current_gps_pos = s;
 
   String t = "";
   if (gps.time.isValid())
@@ -297,20 +303,6 @@ void updateGPSInfo()
   current_gps_time = t;
 }
 
-void showTFTMessage(String msg)
-{
-    static uint64_t timeStamp = 0;
-    if (millis() - timeStamp > 1000) {
-        timeStamp = millis();
-        Serial.println(msg);
-        tft.fillScreen(TFT_BLACK);
-        tft.setTextDatum(MC_DATUM);
-
-        int offset = 0;
-        tft.drawString(msg,  tft.width() / 2, tft.height() + offset++ / 2 );
-    }
-}
-
 void showVoltage()
 {
     static uint64_t timeStamp = 0;
@@ -329,7 +321,7 @@ void showVoltage()
 void showGPS()
 {
     static uint64_t timeStamp = 0;
-    if (millis() - timeStamp > 200) {
+    if (millis() - timeStamp > 100) {
         timeStamp = millis();       
         // String info = current_gps_pos + " " + current_gps_time;
         tft.setTextSize(2);
@@ -342,19 +334,12 @@ void showGPS()
         int16_t yb = tft.height()* 0.1;
         float vh = 0.0;
         float vinc = 0.15;
-        if (gps.location.isValid())
-        {
-          tft.drawString("lat:" + String(gps.location.lat(), 4), wp, yb );
-          vh += vinc;
-          tft.drawString("lg:" + String(gps.location.lng(), 4),wp, (int)(yb + tft.height()*vh));
-          vh += vinc;
-          Serial.println("showGPS " +  String(gps.location.lng(), 6));
-        }
-        else
-        {
-          tft.drawString(F("No-FIX"), wp, yb);
-          vh += vinc;
-        }
+      
+        tft.drawString( String(gps.location.lat(), 6), wp, yb );
+        vh += vinc;
+        tft.drawString( String(gps.location.lng(), 6),wp, (int)(yb + tft.height()*vh));
+        vh += vinc;
+        Serial.println("showGPS " +  String(gps.location.lng(), 6));
 
       String info = String(p, 2) +" hpa   ";
       // sprintf(info, "%f hpa   ", p);
@@ -503,12 +488,13 @@ bool getCurrentGPSInfo()
   {
     if (gps.encode(Serial2.read()))
     {
-      // updateGPSInfo();
+      printGPSInfo();
+      updateGPSInfo();
       return true;
     }
   }
     
-  if (millis() > 2000 && gps.charsProcessed() < 10)
+  if (millis() > 5000 && gps.charsProcessed() < 10)
   {
     Serial.println(F("No GPS detected: check wiring."));
 //    showTFTMessage("No GPS detected: check wiring.");
@@ -537,6 +523,8 @@ void setup()
 
     current_gps_pos = String("no-gps");
     current_gps_time = String("no-gps");
+    current_gps_lat = String("");
+    current_gps_lng = String("");
     current_pressure_inf = String("no-baro");
     current_altitude_inf = String("no-alti");
 
@@ -550,15 +538,6 @@ void setup()
     espDelay(5000);
 
     tft.setRotation(0);
-    int i = 2;
-    while (i--) {
-        tft.fillScreen(TFT_RED);
-        espDelay(100);
-        tft.fillScreen(TFT_BLUE);
-        espDelay(100);
-        tft.fillScreen(TFT_GREEN);
-        espDelay(100);
-    }
     button_init();
 
     esp_adc_cal_characteristics_t adc_chars;
@@ -579,15 +558,16 @@ void loop()
 {
     
 
-    getCurrentGPSInfo();
-    // printGPSInfo();
+   
     // i2c_scanner();
     loop_baro_HP206C();
+    getCurrentGPSInfo();
+    printGPSInfo();
 
     // if (btnCick) {
       // showVoltage();
       showGPS();
-      delayMicroseconds(1000000);
+    espDelay(100);
       // showBaro();
 //        showTFTMessage(current_gps_info);
 //        Serial.println(current_gps_info);
