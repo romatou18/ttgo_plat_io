@@ -329,7 +329,7 @@ void showVoltage()
 void showGPS()
 {
     static uint64_t timeStamp = 0;
-    if (millis() - timeStamp > 1000) {
+    if (millis() - timeStamp > 200) {
         timeStamp = millis();       
         // String info = current_gps_pos + " " + current_gps_time;
         tft.setTextSize(2);
@@ -375,22 +375,6 @@ void showGPS()
        vh += vinc;
         
     }
-}
-
-
-void showBaro()
-{
-  // static char info [40];
-  static uint64_t timeStamp = 0;
-  if (millis() - timeStamp > 1000) {
-      timeStamp = millis();
-      // String info = current_pressure_inf + " " + current_altitude_inf;
-      // Serial.println( "showBaro " + info);
-      
-
-      // tft.drawString(info,  tft.width() / 2, tft.height() / 2 );
-      // tft.drawString(current_altitude_inf,  tft.width() / 2, tft.height()  / 2 );
-  }
 }
 
 void button_init()
@@ -524,11 +508,11 @@ bool getCurrentGPSInfo()
     }
   }
     
-  if (millis() > 5000 && gps.charsProcessed() < 10)
+  if (millis() > 2000 && gps.charsProcessed() < 10)
   {
     Serial.println(F("No GPS detected: check wiring."));
 //    showTFTMessage("No GPS detected: check wiring.");
-    espDelay(2000);
+    espDelay(500);
     return false;
   }
 
@@ -542,12 +526,13 @@ void setup()
     setup_baro_HP206C(); 
 
     tft.init();
-    tft.setRotation(1);
+    tft.setRotation(3);
     tft.fillScreen(TFT_BLACK);
     tft.setTextSize(2);
     tft.setTextColor(TFT_WHITE);
     tft.setCursor(0, 0);
     tft.setTextDatum(MC_DATUM);
+
     tft.setTextSize(1);
 
     current_gps_pos = String("no-gps");
@@ -561,18 +546,18 @@ void setup()
     }
 
     tft.setSwapBytes(true);
-    tft.pushImage(0, 0,  240, 135, ttgo);
+    tft.pushImage(0, 0,  240, 135, kitetrack242r);
     espDelay(5000);
 
     tft.setRotation(0);
-    int i = 5;
+    int i = 2;
     while (i--) {
         tft.fillScreen(TFT_RED);
-        espDelay(200);
+        espDelay(100);
         tft.fillScreen(TFT_BLUE);
-        espDelay(200);
+        espDelay(100);
         tft.fillScreen(TFT_GREEN);
-        espDelay(200);
+        espDelay(100);
     }
     button_init();
 
