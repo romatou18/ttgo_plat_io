@@ -17,6 +17,10 @@
 #include <HP20x_dev.h>
 #include <KalmanFilter.h>
 #include <Wire.h>
+
+#include "FS.h"
+#include "SPIFFS.h"
+
 unsigned char ret = 0;
 
 /* Instance */
@@ -44,6 +48,11 @@ KalmanFilter a_filter;    //altitude filter
 #define BUTTON_1        35
 #define BUTTON_2        0
 
+#define FORMAT_SPIFFS_IF_FAILED true
+#define LOG_FILE_PATH "/logFile.txt"
+
+
+
 TaskHandle_t Task1;
 TaskHandle_t Task2;
 
@@ -51,19 +60,14 @@ static const int RXPin = 38, TXPin = 37;
 static const uint32_t GPSBaud = 9600;
 static volatile float current_gps_lat =0.0;
 static volatile float current_gps_lng =0.0;
+static fs::File logFile;
 
 // static struct {
 //   long Temper;
-//   float t;
-//   float tf;
 
 //   long Pressure;
-//   float p;
-//   float pf;
 
 //   long Altitude;
-//   float a;
-//   float af;
 // } bar_d;
 
 float t, tf;
@@ -87,6 +91,58 @@ Button2 btn2(BUTTON_2);
 char buff[512];
 int vref = 1100;
 int btnCick = false;
+
+bool openWrite(const char * path, const char * message)
+{
+  Serial.printf("Writing file: %s\r\n", path);
+  logFile = SPIFFS.open(path, FILE_WRITE);
+  if(!logFile){
+      Serial.println("- failed to open file for writing");
+      return false;
+  }
+  return true;
+}
+
+bool openAppend(const char * path, const char * message)
+{
+  Serial.printf("Appending to file: %s\r\n", path);
+  logFile = SPIFFS.open(path, FILE_APPEND);
+  if(!logFile){
+      Serial.println("- failed to open file for appending");
+      return false;
+  }
+  return true;
+}
+
+void writeToFile(fs::File& f, const char * message)
+{
+  if(!f.print(message)){
+    Serial.println("- write failed");
+  }
+  f.flush();
+}
+
+void readFile(const char * path){
+  Serial.printf("Reading file: %s\r\n", path);
+
+  logFile = SPIFFS.open(path);
+  if(!logFile || logFile.isDirectory()){
+      Serial.println("- failed to open file for reading");
+      return;
+  }
+
+  Serial.println("- read from file:");
+  while(logFile.available()){
+      Serial.write(logFile.read());
+  }
+  logFile.close();
+}
+
+void closeFile(fs::File& f)
+{
+  f.flush();
+  f.close();
+}
 
 void i2c_scanner() {
   byte error, address;
@@ -142,40 +198,17 @@ void setup_baro_HP206C()
   }
 }
 
-
-// void update_baro_HP206C()
-// {
-
-//   current_pressure_inf = String("no-baro");
-//   current_altitude_inf = String("no-alti");
-//   if(OK_HP20X_DEV == ret)
-//   { 
-//     bar_d.Temper = HP20x.ReadTemperature();
-//     bar_d.t = bar_d.Temper / 100.0; 
-//     bar_d.tf = t_filter.Filter(bar_d.t);
-//     current_temp_inf = String(bar_d.Temper + "C, " + String(bar_d.tf) + "f_C");
-
-//     bar_d.Pressure = HP20x.ReadPressure();
-//     bar_d.p = bar_d.Pressure / 100.0;
-//     bar_d.pf = p_filter.Filter(bar_d.p);
-//     current_pressure_inf = String(bar_d.Pressure + "hPa, " + String(bar_d.pf) + "f_hPa");
-
-//     bar_d.Altitude = HP20x.ReadAltitude();
-//     bar_d.a = bar_d.Altitude / 100.0;
-//     bar_d.af = a_filter.Filter(bar_d.a);
-//     current_altitude_inf = String(bar_d.Altitude + "m, " + String(bar_d.af) + "f_m");
-
-//     espDelay(200);
-//   }
-// }
-
 void loop_baro_HP206C(void* param)
 {
     char display[40];
     static long Temper = 0;
     static long Pressure = 0;
     static long Altitude = 0;
-  for(;;){
+
+    // spiffs_setup();
+
+  for(int i = 0; i< 100; i++)
+  {
     if(OK_HP20X_DEV == ret)
     { 
       int cnt = 25;
@@ -232,9 +265,11 @@ void loop_baro_HP206C(void* param)
       Serial.print(af);
       Serial.println("m.");
       Serial.println("------------------\n");
+      showGPS();
       espDelay(200);
   }
-	 
+  Serial.println("LogFile content:");
+	readFile(LOG_FILE_PATH);
 }
 
 void setup_soft_serial_gps()
@@ -275,45 +310,56 @@ void showVoltage()
 void showGPS()
 {
     static uint64_t timeStamp = 0;
-    if (millis() - timeStamp > 100) {
-        timeStamp = millis();       
-        // String info = current_gps_pos + " " + current_gps_time;
-        tft.setTextSize(2);
-        tft.setRotation(1);
-        tft.setCursor(0,0);
-        tft.fillScreen(TFT_BLACK);
-        tft.setTextDatum(TL_DATUM);
+    if (millis() - timeStamp > 100) 
+    {
+      timeStamp = millis();       
+      // String info = current_gps_pos + " " + current_gps_time;
+      tft.setTextSize(2);
+      tft.setRotation(1);
+      tft.setCursor(0,0);
+      tft.fillScreen(TFT_BLACK);
+      tft.setTextDatum(TL_DATUM);
 
-        int16_t wp = tft.width() * 0.1;
-        int16_t yb = tft.height()* 0.1;
-        float vh = 0.0;
-        float vinc = 0.15;
-      
-        tft.drawString( String(gps.location.lat(), 6), wp, yb );
-        vh += vinc;
-        tft.drawString( String(gps.location.lng(), 6),wp, (int)(yb + tft.height()*vh));
-        vh += vinc;
-        Serial.println("showGPS " +  String(gps.location.lng(), 6));
+      int16_t wp = tft.width() * 0.1;
+      int16_t yb = tft.height()* 0.1;
+      float vh = 0.0;
+      float vinc = 0.15;
+    
+      String lat(gps.location.lat(), 6);
+      String lng(gps.location.lng(), 6);
 
-      String info = String(p, 2) +" hpa   ";
+      tft.drawString(lat , wp, yb );
+      vh += vinc;
+      tft.drawString(lng , wp, (int)(yb + tft.height()*vh));
+      vh += vinc;
+      Serial.println("showGPS " +  String(gps.location.lng(), 6));
+
+      String p_info = String(p, 2) +" hpa   ";
       // sprintf(info, "%f hpa   ", p);
-      tft.drawString(info, wp, yb + tft.height()* vh);
+      tft.drawString(p_info, wp, yb + tft.height()* vh);
        vh += vinc;
       // sprintf(info, "%f fhpa  ", pf);
-      info = String(pf, 2) +" hpaf   ";
-      tft.drawString(info, wp, (int)(yb + tft.height()* vh));
+      String pf_info = String(pf, 2) +" hpaf   ";
+      tft.drawString(pf_info, wp, (int)(yb + tft.height()* vh));
       vh += vinc;
       
       // sprintf(info, "%f m    ", a);
-      info = String(a, 2) +" m   ";
-      tft.drawString(info, wp, (int)(yb + tft.height()* vh));
+      String a_info = String(a, 2) +" m   ";
+      tft.drawString(a_info, wp, (int)(yb + tft.height()* vh));
        vh += vinc;
       // sprintf(info, "%f fm    ", af);
-      info = String(af, 2) +" mf   ";
-      tft.drawString(info, wp, (int)(yb + tft.height()* vh));
-       vh += vinc;
-        
+      String af_info = String(af, 2) +" mf   ";
+      tft.drawString(af_info, wp, (int)(yb + tft.height()* vh));
+      vh += vinc;
+      writeLog(p, pf, a, af, gps.location.lat(), gps.location.lng());
     }
+}
+
+void writeLog(float p, float pf, float a, float af, double lat, double lng)
+{
+  char line[50];
+  snprintf(line, sizeof(line), "%.3f,%.3f,%.3f,%.3f,%.6f,%.6f\n");
+  writeToFile(logFile, line);
 }
 
 void button_init()
@@ -470,9 +516,22 @@ void getCurrentGPSInfo(void * pvParameters)
       espDelay(500);
     }
   }
-
-  showGPS();
   espDelay(50);
+}
+
+void spiffs_setup()
+{
+  bool success = openAppend(LOG_FILE_PATH, FILE_WRITE);
+  if (!success) {
+    Serial.println("There was an error opening the file for writing");
+    return;
+  }
+  if (logFile.print("TEST")) {
+    Serial.println("File was written");
+  } else {
+    Serial.println("File write failed");
+  }
+ 
 }
 
 void setup()
@@ -517,6 +576,12 @@ void setup()
       Serial.printf("Two Point --> coeff_a:%umV coeff_b:%umV\n", adc_chars.coeff_a, adc_chars.coeff_b);
   } else {
       Serial.println("Default Vref: 1100mV");
+  }
+
+  if (!SPIFFS.begin(true)) 
+  {
+    Serial.println("An Error has occurred while mounting SPIFFS");
+    return;
   }
 
      //create a task that will be executed in the Task1code() function, with priority 1 and executed on core 0
