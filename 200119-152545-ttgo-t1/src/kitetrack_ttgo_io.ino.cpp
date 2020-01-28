@@ -1,4 +1,5 @@
-#include "Arduino.h"
+#include "esp_common.h"
+#include "utils.h"
 
 #include <TFT_eSPI.h>
 #include <SPI.h>
@@ -8,20 +9,17 @@
 #include "esp_adc_cal.h"
 #include "bmp.h"
 
-// GPS on Serial2
-#include <TinyGPS++.h>
-#include <HardwareSerial.h>
-#include <Streaming.h>
-
 // Baro HP206C on SPI
 #include <HP20x_dev.h>
 #include <KalmanFilter.h>
 #include <Wire.h>
 
-#include "FS.h"
-#include "SPIFFS.h"
+#include "gps_manager.h"
+#include "sd_file.h"
 
 unsigned char ret = 0;
+
+#define TEST_MODE
 
 /* Instance */
 KalmanFilter t_filter;    //temperature filter
@@ -42,6 +40,8 @@ KalmanFilter a_filter;    //altitude filter
 #define TFT_DC              16
 #define TFT_RST             23
 
+
+
 #define TFT_BL          4  // Display backlight control pin
 #define ADC_EN          14
 #define ADC_PIN         34
@@ -49,18 +49,17 @@ KalmanFilter a_filter;    //altitude filter
 #define BUTTON_2        0
 
 #define FORMAT_SPIFFS_IF_FAILED true
-#define LOG_FILE_PATH "/logFile.txt"
-
-
+// set up variables using the SD utility library functions:
+SPIClass spi_SD(HSPI);
+SDMGT sd_mgt(LOG_FILE_PATH);
 
 TaskHandle_t Task1;
 TaskHandle_t Task2;
 
+const uint32_t GPSBaud = 9600U;
 static const int RXPin = 38, TXPin = 37;
-static const uint32_t GPSBaud = 9600;
-static volatile float current_gps_lat =0.0;
-static volatile float current_gps_lng =0.0;
-static fs::File logFile;
+float current_gps_lat =0.0;
+float current_gps_lng =0.0;
 
 // static struct {
 //   long Temper;
@@ -92,90 +91,93 @@ char buff[512];
 int vref = 1100;
 int btnCick = false;
 
-bool openWrite(const char * path, const char * message)
+
+void setup_sd_card()
 {
-  Serial.printf("Writing file: %s\r\n", path);
-  logFile = SPIFFS.open(path, FILE_WRITE);
-  if(!logFile){
-      Serial.println("- failed to open file for writing");
-      return false;
-  }
-  return true;
+  // bool success = openAppend(LOG_FILE_PATH, fs::FILE_WRITE);
+  // if (!success) {
+  //   ESP_LOGI(TAG,"There was an error opening the file for writing");
+  //   return;
+  // }
+  // if (logFile.print("TEST")) {
+  //   ESP_LOGI(TAG,"File was written");
+  // } else {
+  //   ESP_LOGI(TAG,"File write failed");
+  // }
+ 
+  SDMGT::reader_spi_setup(sd_mgt);
+
+  #ifdef TEST_MODE
+  SDMGT::test_sd_card();
+  #endif
 }
 
-bool openAppend(const char * path, const char * message)
+
+void writeLog(float p, float pf, float a, float af, double lat, double lng)
 {
-  Serial.printf("Appending to file: %s\r\n", path);
-  logFile = SPIFFS.open(path, FILE_APPEND);
-  if(!logFile){
-      Serial.println("- failed to open file for appending");
-      return false;
-  }
-  return true;
+  char line[50];
+  snprintf(line, sizeof(line), "%.3f,%.3f,%.3f,%.3f,%.6f,%.6f\n", p, pf,a, af, lat, lng);
+  sd_mgt.logToFile(line);
 }
 
-void writeToFile(fs::File& f, const char * message)
+void showGPS()
 {
-  if(!f.print(message)){
-    Serial.println("- write failed");
-  }
-  f.flush();
-}
+    static uint64_t timeStamp = 0;
+    if (millis() - timeStamp > 100) 
+    {
+      timeStamp = millis();       
+      // String info = current_gps_pos + " " + current_gps_time;
+      tft.setTextSize(2);
+      tft.setRotation(1);
+      tft.setCursor(0,0);
+      tft.fillScreen(TFT_BLACK);
+      tft.setTextDatum(TL_DATUM);
 
-void readFile(const char * path){
-  Serial.printf("Reading file: %s\r\n", path);
+      int16_t wp = tft.width() * 0.1;
+      int16_t yb = tft.height()* 0.1;
+      float vh = 0.0;
+      float vinc = 0.15;
+    
+      String lat(gps.location.lat(), 6);
+      String lng(gps.location.lng(), 6);
 
-  logFile = SPIFFS.open(path);
-  if(!logFile || logFile.isDirectory()){
-      Serial.println("- failed to open file for reading");
-      return;
-  }
+      tft.drawString(lat , wp, yb );
+      vh += vinc;
+      tft.drawString(lng , wp, (int)(yb + tft.height()*vh));
+      vh += vinc;
+      Serial.println("showGPS " +  String(gps.location.lng(), 6));
 
-  Serial.println("- read from file:");
-  while(logFile.available()){
-      Serial.write(logFile.read());
-  }
-  logFile.close();
-}
-
-void closeFile(fs::File& f)
-{
-  f.flush();
-  f.close();
-}
-
-void i2c_scanner() {
-  byte error, address;
-  int nDevices;
-  Serial.println("Scanning...");
-  nDevices = 0;
-  for(address = 1; address < 127; address++ ) {
-    Wire.beginTransmission(address);
-    error = Wire.endTransmission();
-    if (error == 0) {
-      Serial.print("I2C device found at address 0x");
-      if (address<16) {
-        Serial.print("0");
-      }
-      Serial.println(address,HEX);
-      nDevices++;
+      String p_info = String(p, 2) +" hpa   ";
+      // sprintf(info, "%f hpa   ", p);
+      tft.drawString(p_info, wp, yb + tft.height()* vh);
+       vh += vinc;
+      // sprintf(info, "%f fhpa  ", pf);
+      String pf_info = String(pf, 2) +" hpaf   ";
+      tft.drawString(pf_info, wp, (int)(yb + tft.height()* vh));
+      vh += vinc;
+      
+      // sprintf(info, "%f m    ", a);
+      String a_info = String(a, 2) +" m   ";
+      tft.drawString(a_info, wp, (int)(yb + tft.height()* vh));
+       vh += vinc;
+      // sprintf(info, "%f fm    ", af);
+      String af_info = String(af, 2) +" mf   ";
+      tft.drawString(af_info, wp, (int)(yb + tft.height()* vh));
+      vh += vinc;
+      writeLog(p, pf, a, af, gps.location.lat(), gps.location.lng());
     }
-    else if (error==4) {
-      Serial.print("Unknow error at address 0x");
-      if (address<16) {
-        Serial.print("0");
-      }
-      Serial.println(address,HEX);
-    }    
-  }
-  if (nDevices == 0) {
-    Serial.println("No I2C devices found\n");
-    //exit(EXIT_FAILURE);
-  }
-  else {
-    Serial.println("done\n");
-  }
-  espDelay(5000);          
+}
+
+void setup_soft_serial_gps()
+{
+  Serial.print("setup_soft_serial_gps() running on core ");
+  Serial.println(xPortGetCoreID());
+  // Open serial communications and wait for port to open:
+//  gps_serial.begin(GPSBaud, SWSERIAL_8N1, RXPin, TXPin, false, 95, 11); // RX, TX GPS
+  Serial2.begin(GPSBaud,SERIAL_8N1, RXPin, TXPin);    //Baud rate, parity mode, RX, TX
+
+  Serial.println(" GPS serial init success");
+  espDelay(1000); 
 }
 
 void setup_baro_HP206C() 
@@ -200,7 +202,6 @@ void setup_baro_HP206C()
 
 void loop_baro_HP206C(void* param)
 {
-    char display[40];
     static long Temper = 0;
     static long Pressure = 0;
     static long Altitude = 0;
@@ -269,28 +270,10 @@ void loop_baro_HP206C(void* param)
       espDelay(200);
   }
   Serial.println("LogFile content:");
-	readFile(LOG_FILE_PATH);
+  sd_mgt.readLogFileToSerial();
 }
 
-void setup_soft_serial_gps()
-{
-  Serial.print("setup_soft_serial_gps() running on core ");
-  Serial.println(xPortGetCoreID());
-  // Open serial communications and wait for port to open:
-//  gps_serial.begin(GPSBaud, SWSERIAL_8N1, RXPin, TXPin, false, 95, 11); // RX, TX GPS
-  Serial2.begin(GPSBaud,SERIAL_8N1, RXPin, TXPin);    //Baud rate, parity mode, RX, TX
 
-  Serial.println(" GPS serial init success");
-  espDelay(1000); 
-}
-
-//! Long time delay, it is recommended to use shallow sleep, which can effectively reduce the current consumption
-void espDelay(int ms)
-{   
-    esp_sleep_enable_timer_wakeup(ms * 1000);
-    esp_sleep_pd_config(ESP_PD_DOMAIN_RTC_PERIPH,ESP_PD_OPTION_ON);
-    esp_light_sleep_start();
-}
 
 void showVoltage()
 {
@@ -305,61 +288,6 @@ void showVoltage()
         tft.setTextDatum(MC_DATUM);
         tft.drawString(voltage,  tft.width() / 2, tft.height() / 2 );
     }
-}
-
-void showGPS()
-{
-    static uint64_t timeStamp = 0;
-    if (millis() - timeStamp > 100) 
-    {
-      timeStamp = millis();       
-      // String info = current_gps_pos + " " + current_gps_time;
-      tft.setTextSize(2);
-      tft.setRotation(1);
-      tft.setCursor(0,0);
-      tft.fillScreen(TFT_BLACK);
-      tft.setTextDatum(TL_DATUM);
-
-      int16_t wp = tft.width() * 0.1;
-      int16_t yb = tft.height()* 0.1;
-      float vh = 0.0;
-      float vinc = 0.15;
-    
-      String lat(gps.location.lat(), 6);
-      String lng(gps.location.lng(), 6);
-
-      tft.drawString(lat , wp, yb );
-      vh += vinc;
-      tft.drawString(lng , wp, (int)(yb + tft.height()*vh));
-      vh += vinc;
-      Serial.println("showGPS " +  String(gps.location.lng(), 6));
-
-      String p_info = String(p, 2) +" hpa   ";
-      // sprintf(info, "%f hpa   ", p);
-      tft.drawString(p_info, wp, yb + tft.height()* vh);
-       vh += vinc;
-      // sprintf(info, "%f fhpa  ", pf);
-      String pf_info = String(pf, 2) +" hpaf   ";
-      tft.drawString(pf_info, wp, (int)(yb + tft.height()* vh));
-      vh += vinc;
-      
-      // sprintf(info, "%f m    ", a);
-      String a_info = String(a, 2) +" m   ";
-      tft.drawString(a_info, wp, (int)(yb + tft.height()* vh));
-       vh += vinc;
-      // sprintf(info, "%f fm    ", af);
-      String af_info = String(af, 2) +" mf   ";
-      tft.drawString(af_info, wp, (int)(yb + tft.height()* vh));
-      vh += vinc;
-      writeLog(p, pf, a, af, gps.location.lat(), gps.location.lng());
-    }
-}
-
-void writeLog(float p, float pf, float a, float af, double lat, double lng)
-{
-  char line[50];
-  snprintf(line, sizeof(line), "%.3f,%.3f,%.3f,%.3f,%.6f,%.6f\n");
-  writeToFile(logFile, line);
 }
 
 void button_init()
@@ -431,108 +359,6 @@ void wifi_scan()
     WiFi.mode(WIFI_OFF);
 }
 
-void printGPSInfo()
-{
-  Serial.print(F("Location: ")); 
-  if (gps.location.isValid())
-  {
-    Serial.print(gps.location.lat(), 6);
-    Serial.print(F(","));
-    Serial.print(gps.location.lng(), 6);
-  }
-  else
-  {
-    Serial.print(F("INVALID"));
-  }
-
-  Serial.print(F("  Date/Time: "));
-  if (gps.date.isValid())
-  {
-    Serial.print(gps.date.month());
-    Serial.print(F("/"));
-    Serial.print(gps.date.day());
-    Serial.print(F("/"));
-    Serial.print(gps.date.year());
-  }
-  else
-  {
-    Serial.print(F("INVALID"));
-  }
-
-  Serial.print(F(" "));
-  if (gps.time.isValid())
-  {
-    if (gps.time.hour() < 10) Serial.print(F("0"));
-    Serial.print(gps.time.hour());
-    Serial.print(F(":"));
-    if (gps.time.minute() < 10) Serial.print(F("0"));
-    Serial.print(gps.time.minute());
-    Serial.print(F(":"));
-    if (gps.time.second() < 10) Serial.print(F("0"));
-    Serial.print(gps.time.second());
-    Serial.print(F("."));
-    if (gps.time.centisecond() < 10) Serial.print(F("0"));
-    Serial.print(gps.time.centisecond());
-  }
-  else
-  {
-    Serial.print(F("INVALID"));
-  }
-
-  Serial.println();
-}
-
-void getCurrentGPSInfo(void * pvParameters)
-{
-  Serial.print("updateGPSInfo() running on core ");
-  Serial.println(xPortGetCoreID());
-  for(;;){
-    if (Serial2.available() > 0)
-    {
-      if (gps.encode(Serial2.read()))
-      {
-        if (gps.location.isValid())
-        {
-          current_gps_lat = gps.location.lat();
-          // s += F(",");
-          current_gps_lng = gps.location.lat();
-          // s += String(gps.location.lng(), 6);
-        }
-        else
-        {
-          // s += F("No-GPS-signal");
-          current_gps_lat =0.0;
-          // s += F(",");
-          current_gps_lng = 0.0;
-        }
-        printGPSInfo();
-      }
-    }
-      
-    if (millis() > 5000 && gps.charsProcessed() < 10)
-    {
-      Serial.println(F("No GPS detected: check wiring."));
-  //    showTFTMessage("No GPS detected: check wiring.");
-      espDelay(500);
-    }
-  }
-  espDelay(50);
-}
-
-void spiffs_setup()
-{
-  bool success = openAppend(LOG_FILE_PATH, FILE_WRITE);
-  if (!success) {
-    Serial.println("There was an error opening the file for writing");
-    return;
-  }
-  if (logFile.print("TEST")) {
-    Serial.println("File was written");
-  } else {
-    Serial.println("File write failed");
-  }
- 
-}
 
 void setup()
 {
@@ -541,6 +367,7 @@ void setup()
 
 
   espDelay(500); 
+  setup_sd_card();
   setup_soft_serial_gps();
   setup_baro_HP206C(); 
 
@@ -578,11 +405,11 @@ void setup()
       Serial.println("Default Vref: 1100mV");
   }
 
-  if (!SPIFFS.begin(true)) 
-  {
-    Serial.println("An Error has occurred while mounting SPIFFS");
-    return;
-  }
+  // if (!SPIFFS.begin(true)) 
+  // {
+  //   Serial.println("An Error has occurred while mounting SPIFFS");
+  //   return;
+  // }
 
      //create a task that will be executed in the Task1code() function, with priority 1 and executed on core 0
   xTaskCreatePinnedToCore(
