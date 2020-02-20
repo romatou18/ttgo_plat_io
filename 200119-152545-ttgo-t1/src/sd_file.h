@@ -18,7 +18,7 @@
 #define SD_CS 33
 #define SD_SPEED 4000000U //26 Mhz max on matrixed HSPI otherwise 27mhz
 
-#define TAG "sd-manager";
+#define SDTAG "sd-manager";
 
 #define MIN_SD_BYTES 5 * 1014 * 1024; //5MB
 
@@ -33,8 +33,11 @@ private:
     File _file;
     bool _closed;
     uint8_t _flushCount;
+    uint8_t _closeCount;
+
 
     static const uint8_t FLUSH_LINE_LIMIT = 20;
+    static const uint8_t CLOSE_LINE_LIMIT = 5 * FLUSH_LINE_LIMIT;
 
 public:
     ~SDMGT()
@@ -51,15 +54,28 @@ public:
         SDMGT::createDir(SD, "/logs");
         if (SD.exists(LOG_FILE_PATH))
         {
-            ESP_LOGI(TAG, LOG_FILE_PATH " exists.");
+            ESP_LOGI(SDTAG, LOG_FILE_PATH " exists.");
             _file = SD.open(LOG_FILE_PATH, FILE_APPEND);
         }
         else
         {
-            ESP_LOGI(TAG, LOG_FILE_PATH " doesn't exist.");
+            ESP_LOGI(SDTAG, LOG_FILE_PATH " doesn't exist.");
             _file = SD.open(LOG_FILE_PATH, FILE_WRITE);
         }
         _closed = false;
+    }
+
+    void closeFile()
+    {
+        _file.close();
+        _closeCount = 0;
+        _closed = true;
+    }
+
+     void flushFile()
+    {
+        _file.flush();
+        _flushCount = 0;
     }
 
     void logToFile(const char * line)
@@ -69,15 +85,21 @@ public:
             openFile();
         }
 
-        if(!_file.print(line)){
-            ESP_LOGE(TAG,"- write failed");
+        if(!_file.println(line)){
+            ESP_LOGE(SDTAG,"- write failed");
         }
-        ++_flushCount;
-        if(_flushCount % FLUSH_LINE_LIMIT == 0)
+
+        if(_flushCount++ % FLUSH_LINE_LIMIT == 0)
         {
-            _file.flush();
-            _flushCount = 0;
+            flushFile();
         }
+
+         if(_closeCount++ % CLOSE_LINE_LIMIT == 0)
+        {
+            closeFile();
+        }
+
+        
     }
 
     void readLogFileToSerial()
@@ -132,7 +154,7 @@ public:
     uint64_t card_size_mb()
     {
         uint64_t cardSize = SD.cardSize() / (1024 * 1024);
-        ESP_LOGI(TAG, "SD Card Size: %lluMB\n", cardSize);
+        ESP_LOGI(SDTAG, "SD Card Size: %lluMB\n", cardSize);
         return cardSize;
     }
     static
@@ -140,9 +162,9 @@ public:
     {
         // (14,2,15,13);
         spi_SD.begin(SD_SCKL, SD_MISO, SD_MOSI, SD_CS); //CLK,MISO,MOIS,SS
-        ESP_LOGI(TAG, "SPI SD Init ok.");
+        ESP_LOGI(SDTAG, "SPI SD Init ok.");
         espDelay(100);
-        ESP_LOGI(TAG, "Initializing SD card...");
+        ESP_LOGI(SDTAG, "Initializing SD card...");
 
         // see if the card is present and can be initialized:
         if (!SD.begin(SD_CS, spi_SD, SD_SPEED))
@@ -154,30 +176,31 @@ public:
             {
                 if (!SD.begin(SD_CS, spi_SD, SD_SPEED))
                 {
-                    ESP_LOGE(TAG, "SD Card mount failed!");
+                    ESP_LOGE(SDTAG, "SD Card mount failed!");
                 }
                 else
                 {
                     ok = true;
-                    ESP_LOGI(TAG, "SD Card mount success!");
+                    ESP_LOGI(SDTAG, "SD Card mount success!");
                     break;
                 }
                 espDelay(2000);
             }
         }
 
-        ESP_LOGI(TAG, "card initialized. checking free space...");
+        ESP_LOGI(SDTAG, "card initialized. checking free space...");
         if (!check_free_space_bytes())
         {
-            ESP_LOGE(TAG, "SD Card full!");
+            ESP_LOGE(SDTAG, "SD Card full!");
             // don't do anything more:
             while (1)
                 ;
         }
         m.openFile();
+        m.logToFile("Session start");
        
         // open a new file and immediately close it:
-        ESP_LOGI(TAG, "reader_spi_setup() done");
+        ESP_LOGI(SDTAG, "reader_spi_setup() done");
     }
 
     static
@@ -186,12 +209,12 @@ public:
         File dir = fs.open(dirname);
         if (!dir)
         {
-            ESP_LOGE(TAG, "Failed to open directory");
+            ESP_LOGE(SDTAG, "Failed to open directory");
             return false;
         }
         if (!dir.isDirectory())
         {
-            ESP_LOGE(TAG, "Not a directory");
+            ESP_LOGE(SDTAG, "Not a directory");
             return false;
         }
         return true;
@@ -200,17 +223,17 @@ public:
     static
     void listDir(fs::FS &fs, const char *dirname, uint8_t levels)
     {
-        ESP_LOGI(TAG, "Listing directory: %s\n", dirname);
+        ESP_LOGI(SDTAG, "Listing directory: %s\n", dirname);
 
         File root = fs.open(dirname);
         if (!root)
         {
-            ESP_LOGE(TAG, "Failed to open directory");
+            ESP_LOGE(SDTAG, "Failed to open directory");
             return;
         }
         if (!root.isDirectory())
         {
-            ESP_LOGE(TAG, "Not a directory");
+            ESP_LOGE(SDTAG, "Not a directory");
             return;
         }
 
@@ -219,8 +242,8 @@ public:
         {
             if (file.isDirectory())
             {
-                ESP_LOGI(TAG, " DIR : ");
-                ESP_LOGI(TAG, file.name());
+                ESP_LOGI(SDTAG, " DIR : ");
+                ESP_LOGI(SDTAG, file.name());
                 if (levels)
                 {
                     listDir(fs, file.name(), levels - 1);
@@ -228,9 +251,9 @@ public:
             }
             else
             {
-                ESP_LOGI(TAG, " FILE: ");
-                ESP_LOGI(TAG, file.name());
-                ESP_LOGI(TAG, " SIZE: ");
+                ESP_LOGI(SDTAG, " FILE: ");
+                ESP_LOGI(SDTAG, file.name());
+                ESP_LOGI(SDTAG, " SIZE: ");
                 ESP_LOGI(file.size());
             }
             file = root.openNextFile();
@@ -421,20 +444,20 @@ public:
         // we'll use the initialization code from the utility libraries
         // since we're just testing if the card is working!
         uint8_t cardType = SD.cardType();
-        ESP_LOGI(TAG, "Card type:         ");
+        ESP_LOGI(SDTAG, "Card type:         ");
         switch (cardType)
         {
         case CARD_NONE:
-            ESP_LOGE(TAG, "No card found");
+            ESP_LOGE(SDTAG, "No card found");
             break;
         case CARD_MMC:
-            ESP_LOGI(TAG, "MMC");
+            ESP_LOGI(SDTAG, "MMC");
             break;
         case CARD_SDHC:
-            ESP_LOGI(TAG, "SDHC");
+            ESP_LOGI(SDTAG, "SDHC");
             break;
         default:
-            ESP_LOGE(TAG, "CARD_UNKNOWN");
+            ESP_LOGE(SDTAG, "CARD_UNKNOWN");
             break;
         }
 
@@ -467,10 +490,10 @@ public:
 /*
 bool openWrite(const char * path, const char * message)
 {
-  ESP_LOGI(TAG,"Writing file: %s\r\n", path);
+  ESP_LOGI(SDTAG,"Writing file: %s\r\n", path);
   logFile = SPIFFS.open(path, FILE_WRITE);
   if(!logFile){
-      ESP_LOGE(TAG,"- failed to open file for writing");
+      ESP_LOGE(SDTAG,"- failed to open file for writing");
       return false;
   }
   return true;
@@ -478,10 +501,10 @@ bool openWrite(const char * path, const char * message)
 
 bool openAppend(const char * path, const char * message)
 {
-  ESP_LOGI(TAG,"Appending to file: %s\r\n", path);
+  ESP_LOGI(SDTAG,"Appending to file: %s\r\n", path);
   logFile = SPIFFS.open(path, FILE_APPEND);
   if(!logFile){
-      ESP_LOGE(TAG,"- failed to open file for appending");
+      ESP_LOGE(SDTAG,"- failed to open file for appending");
       return false;
   }
   return true;
@@ -490,21 +513,21 @@ bool openAppend(const char * path, const char * message)
 void writeToFile(fs::File& f, const char * message)
 {
   if(!f.print(message)){
-    ESP_LOGE(TAG,"- write failed");
+    ESP_LOGE(SDTAG,"- write failed");
   }
   f.flush();
 }
 
 void readFile(const char * path){
-  ESP_LOGI(TAG,"Reading file: %s\r\n", path);
+  ESP_LOGI(SDTAG,"Reading file: %s\r\n", path);
 
   logFile = SPIFFS.open(path);
   if(!logFile || logFile.isDirectory()){
-      ESP_LOGE(TAG,"- failed to open file for reading");
+      ESP_LOGE(SDTAG,"- failed to open file for reading");
       return;
   }
 
-  ESP_LOGI(TAG,"- read from file:");
+  ESP_LOGI(SDTAG,"- read from file:");
   while(logFile.available()){
       Serial.write(logFile.read());
   }
