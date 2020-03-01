@@ -22,9 +22,9 @@ extern const uint32_t GPSBaud;
 extern float current_gps_lat;
 extern float current_gps_lng;
 
-extern QueueHandle_t gpsQueue;
+extern QueueHandle_t g_gpsQueue;
 #define GPS_QUEUE_SIZE 2
-extern std::array<GPSupdate, GPS_QUEUE_SIZE> gpsUpdateList;
+extern std::array<GPSupdate, GPS_QUEUE_SIZE> g_gpsUpdateList;
 
 
 
@@ -83,7 +83,7 @@ void printGPSInfo()
 
 void getCurrentGPSInfo(void * pvParameters)
 {
-  GPSupdate* gps_update_ptr;
+  static GPSupdate* gps_update_ptr;
   static uint64_t idx = 0;
 
   Serial.print("updateGPSInfo() running on core ");
@@ -91,81 +91,94 @@ void getCurrentGPSInfo(void * pvParameters)
 
   // Create a queue capable of containing 10 pointers to AMessage structures.
   // These should be passed by pointer as they contain a lot of data.
-   
-  for(;;){
-    if (Serial2.available() > 0)
-    {
-      if (gps.encode(Serial2.read()))
+  // static uint64_t timeStamp = 0;
+  for(;;)
+  {
+    // Serial.print("updateGPSInfo() running on core ");
+    // Serial.println(xPortGetCoreID());
+    // if (millis() - timeStamp > 500) 
+    // {
+    //   timeStamp = millis();  
+      if (Serial2.available() > 0)
       {
-        if (gps.location.isValid() && gps.location.isUpdated())
+        // Serial.println("Serial2.available()");
+        if (gps.encode(Serial2.read()))
         {
-          Serial.print(gps.location.lat(), 6);
-          Serial.print(F(","));
-          Serial.print(gps.location.lng(), 6);
-          gps_update_ptr = &gpsUpdateList[idx++ % GPS_QUEUE_SIZE];
-          gps_update_ptr->current_gps_lat = gps.location.lat();
-          // s += F(",");
-          gps_update_ptr->current_gps_lng = gps.location.lng();
-
-          if(gps.date.isValid())
+          if (gps.location.isValid() && gps.location.isUpdated())
           {
-            Serial.print(gps.date.month());
-            Serial.print(F("/"));
-            Serial.print(gps.date.day());
-            Serial.print(F("/"));
-            Serial.print(gps.date.year());
+            Serial.print(gps.location.lat(), 6);
+            Serial.print(F(","));
+            Serial.print(gps.location.lng(), 6);
+            gps_update_ptr = &g_gpsUpdateList[idx++ % GPS_QUEUE_SIZE];
+            gps_update_ptr->current_gps_lat = gps.location.lat();
+            // s += F(",");
+            gps_update_ptr->current_gps_lng = gps.location.lng();
 
-            gps_update_ptr->day = gps.date.day();
-            gps_update_ptr->month = gps.date.month();
-          }
+            if(gps.date.isValid())
+            {
+              Serial.print(gps.date.month());
+              Serial.print(F("/"));
+              Serial.print(gps.date.day());
+              Serial.print(F("/"));
+              Serial.print(gps.date.year());
 
-          Serial.print(F(" "));
-          if(gps.time.isValid())
-          {
-            if (gps.time.hour() < 10) Serial.print(F("0"));
-            Serial.print(gps.time.hour());
-            Serial.print(F(":"));
-            if (gps.time.minute() < 10) Serial.print(F("0"));
-            Serial.print(gps.time.minute());
-            Serial.print(F(":"));
-            if (gps.time.second() < 10) Serial.print(F("0"));
-            Serial.print(gps.time.second());
-            Serial.print(F("."));
-            if (gps.time.centisecond() < 10) Serial.print(F("0"));
-            Serial.print(gps.time.centisecond());
-            Serial.println(F(""));
-            
-            gps_update_ptr->h = gps.time.hour();
-            gps_update_ptr->min = gps.time.minute();
-            gps_update_ptr->s = gps.time.second();
-            gps_update_ptr->cs = gps.time.centisecond();
-             // Send a pointer to a struct AMessage object.  Don't block if the
-            // queue is already full.
-            xQueueSend( gpsQueue, ( void * ) &gps_update_ptr, ( TickType_t ) 0 );
+              gps_update_ptr->day = gps.date.day();
+              gps_update_ptr->month = gps.date.month();
+            }
+
+            Serial.print(F(" "));
+            if(gps.time.isValid())
+            {
+              if (gps.time.hour() < 10) Serial.print(F("0"));
+              Serial.print(gps.time.hour());
+              Serial.print(F(":"));
+              if (gps.time.minute() < 10) Serial.print(F("0"));
+              Serial.print(gps.time.minute());
+              Serial.print(F(":"));
+              if (gps.time.second() < 10) Serial.print(F("0"));
+              Serial.print(gps.time.second());
+              Serial.print(F("."));
+              if (gps.time.centisecond() < 10) Serial.print(F("0"));
+              Serial.print(gps.time.centisecond());
+              Serial.println(F(""));
+
+              gps_update_ptr->h = gps.time.hour();
+              gps_update_ptr->min = gps.time.minute();
+              gps_update_ptr->s = gps.time.second();
+              gps_update_ptr->cs = gps.time.centisecond();
+              // Send a pointer to a struct AMessage object.  Don't block if the
+              // queue is already full.
+              xQueueSend( g_gpsQueue, ( void * ) &gps_update_ptr, ( TickType_t ) 0 );
+              vTaskDelay(400);
+            }
+            else
+            {
+              Serial.print(F("INVALID TIME/DATE"));
+            }
+            // s += String(gps.location.lng(), 6);
           }
           else
           {
-            Serial.print(F("INVALID TIME/DATE"));
+            // Serial.print(F("INVALID FIX"));
           }
-          // s += String(gps.location.lng(), 6);
-        }
-        else
-        {
-          // Serial.print(F("INVALID FIX"));
-        }
 
-      
-        // printGPSInfo();
+        
+          // printGPSInfo();
+        } else {
+          // Serial.println("NOT GPS location is updated!");
+        }
+      } else {
+          // Serial.println("NOT Serial2.available()!");
       }
-    }
-      
-    if (millis() > 5000 && gps.charsProcessed() < 10)
-    {
-      Serial.println(F("No GPS detected: check wiring."));
-  //    showTFTMessage("No GPS detected: check wiring.");
-      espDelay(500);
-    }
-  
+        
+      if (millis() > 5000 && gps.charsProcessed() < 10)
+      {
+        Serial.println(F("No GPS detected: check wiring."));
+    //    showTFTMessage("No GPS detected: check wiring.");
+        espDelay(500);
+      }
+    // }
+    
   }
-  espDelay(500);
+  vTaskDelete(NULL);
 }

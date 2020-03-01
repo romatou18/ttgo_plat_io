@@ -6,17 +6,7 @@
 #include <SPI.h>
 #include <sd_defines.h>
 
-// #define SD_MOSI 13
-// #define SD_MISO 12
-// #define SD_SCKL 2
-// #define SD_CS 15
 // #define SD_SPEED 26000000U //26 Mhz max on matrixed HSPI otherwise 27mhz
-
-#define SD_MOSI 26
-#define SD_MISO 25
-#define SD_SCKL 32
-#define SD_CS 33
-#define SD_SPEED 4000000U //26 Mhz max on matrixed HSPI otherwise 27mhz
 
 #define SDTAG "sd-manager";
 
@@ -34,7 +24,6 @@ private:
     bool _closed;
     uint8_t _flushCount;
     uint8_t _closeCount;
-
 
     static const uint8_t FLUSH_LINE_LIMIT = 20;
     static const uint8_t CLOSE_LINE_LIMIT = 5 * FLUSH_LINE_LIMIT;
@@ -157,11 +146,16 @@ public:
         ESP_LOGI(SDTAG, "SD Card Size: %lluMB\n", cardSize);
         return cardSize;
     }
+    
     static
     void reader_spi_setup(SDMGT& m)
     {
         // (14,2,15,13);
+        // spi_SD.begin(SD_SCKL, SD_MISO, SD_MOSI, SD_CS); //CLK,MISO,MOIS,SS
         spi_SD.begin(SD_SCKL, SD_MISO, SD_MOSI, SD_CS); //CLK,MISO,MOIS,SS
+        ESP_LOGI(SDTAG, F("SPI SD Init ok."));
+        espDelay(100);
+        
         ESP_LOGI(SDTAG, "SPI SD Init ok.");
         espDelay(100);
         ESP_LOGI(SDTAG, "Initializing SD card...");
@@ -169,7 +163,6 @@ public:
         // see if the card is present and can be initialized:
         if (!SD.begin(SD_CS, spi_SD, SD_SPEED))
         {
-            
             // don't do anything more:
             bool ok = false;
             while (!ok)
@@ -181,7 +174,7 @@ public:
                 else
                 {
                     ok = true;
-                    ESP_LOGI(SDTAG, "SD Card mount success!");
+                    ESP_LOGE(SDTAG, "SD Card mount success!");
                     break;
                 }
                 espDelay(2000);
@@ -200,7 +193,7 @@ public:
         m.logToFile("Session start");
        
         // open a new file and immediately close it:
-        ESP_LOGI(SDTAG, "reader_spi_setup() done");
+        ESP_LOGE(SDTAG, "reader_spi_setup() done");
     }
 
     static
