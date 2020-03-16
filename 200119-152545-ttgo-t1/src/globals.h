@@ -53,18 +53,23 @@
  * GPS
  **********************************************
  */
-constexpr uint32_t GPSBaud = 9600U;
-constexpr int RX_pin = 38, TX_pin = 37;
+#define GPS_REFRESH_RATE_HZ 10
+#define GPS_PPS_INT_ENABLED 1
+static constexpr uint32_t GPSBaud = 9600U;
+static constexpr int RX_pin = 38, TX_pin = 37;
+static constexpr int GPS_PPS_PIN = 39;
+static constexpr int GPS_QUEUE_SIZE = 20;
 
 
 /**********************************************
  * BAROMETER / I2C #1
  **********************************************
  */
-#define I2CBUS_ID_HP206 1
+static constexpr uint8_t refresh_rate_baro_hz = 15;
+static constexpr uint8_t I2CBUS_ID_HP206 = 1;
 #define SDA_1 21
 #define SCL_1 22
-#define BARO_QUEUE_SIZE 30
+static constexpr uint8_t BARO_QUEUE_SIZE = 30;
 #define BARO_TAG "baro"
 
 
@@ -75,21 +80,34 @@ constexpr int RX_pin = 38, TX_pin = 37;
 
 // #define MPU_HIDEAKITAI false
 // #define MPU_BOLDER true
-#define MPU_SPARKFUN true
+// #define MPU_SPARKFUN trues
 
 static constexpr float NELSON_MAGNETIC_DECLINATION = 20.49;
 #define MPU9250_I2C_ADR 0x68
 // #define I2CBUS_ID_MPU9250 0
-// #define SDA_2 17
-// #define SCL_2 2
+#define SDA_2 17
+#define SCL_2 2
 #define IMU_CS 13
 #define IMU_INT_PIN 12 
 #define WAKE_ON_MOTION_INTERRUPT_PIN 12
 
-
-enum {
-    X = 0,
-    Y = 1,
-    Z = 2
-} COORD;
 #define IMU_QUEUE_SIZE 400
+
+typedef enum
+{
+  GPS_T,
+  BARO_T,
+  IMU_T
+} EventType_t;
+
+typedef struct 
+{
+  void *update_p;
+  EventType_t type;
+} QueueUpdate;
+
+/***************************
+ * TASKS DELAYS
+ ***************************/
+#define GPS_TASK_DELAY 1U
+#define SCREEN_TASK_DELAY 10U

@@ -5,7 +5,6 @@
 #include <stdint.h>
 #include "Arduino.h"
 
-
 void i2c_scanner() {
   byte error, address;
   int nDevices;

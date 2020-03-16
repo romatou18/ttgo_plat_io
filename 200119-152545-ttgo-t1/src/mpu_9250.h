@@ -4,7 +4,7 @@
 #include "Wire.h"
 
 #include "esp_common.h"
-
+#include "mpu.hpp"
 
 
 #if MPU_BOLDER
@@ -55,13 +55,6 @@ static float g_gyro[3] = {0.0 , 0.0, 0.0};
 static float g_accel[3] = {0.0 , 0.0, 0.0};
 
 
-typedef struct {
-    float q[4];
-    float yaw;
-    float pitch;
-    float roll;
-    portMUX_TYPE mpu_latest_mutex;
-} imu_raw_t; 
 
 
 #define TAG __file__
@@ -119,6 +112,7 @@ void setup_interrupt_wom()
     attachInterrupt(WAKE_ON_MOTION_INTERRUPT_PIN, wakeUp ,RISING);
 }
 #endif
+
 
 
 
@@ -227,22 +221,27 @@ void setup_mpu9265()
 #if MPU_SPARKFUN
     
     pinMode(IMU_INT_PIN, INPUT_PULLUP);
+    
     if (imu->begin() != INV_SUCCESS) {
-    while (1) {
-        Serial.println("Unable to communicate with MPU-9250");
-        Serial.println("Check connections, and try again.");
-        Serial.println();
-        delay(5000);
-    }
+        while (1) {
+            Serial.println("Unable to communicate with MPU-9250");
+            Serial.println("Check connections, and try again.");
+            Serial.println();
+            vTaskDelay(5000 / portTICK_PERIOD_MS);
+        }
     }
 
     imu->enableInterrupt();
     imu->setIntLevel(INT_ACTIVE_LOW);
     imu->setIntLatched(INT_LATCHED);
+    // get expected DMP packet size for later comparison	
 
+    imu->setSampleRate(50); // Set sample rate to 100Hz	
+    imu->configureFifo(INV_XYZ_GYRO |INV_XYZ_ACCEL);
+    
     imu->dmpBegin(DMP_FEATURE_6X_LP_QUAT | // Enable 6-axis quat
                 DMP_FEATURE_GYRO_CAL, // Use gyro calibration
-                10); // Set DMP FIFO rate to 10 Hz
+                50); // Set DMP FIFO rate to 10 Hz
     imu->dmpSetOrientation(orientationDefault);
 
 #endif
@@ -348,4 +347,124 @@ void mpu_task(void * param)
 #endif
 }
 
+#ifdef MPU_SPARKFUN
+void imuTask(void* param)
+{
+  Serial.print("imuTask() running on core ");
+  Serial.println(xPortGetCoreID());
+    if(! param) {
+        ESP_LOGE("Null param!");
+        vTaskDelete(NULL);
+    }
+  imu_raw_t* g_imu_latest = reinterpret_cast<imu_raw_t*>(param);
+  configASSERT(param);
+
+  String output;
+  unsigned short fifoCnt;
+  inv_error_t result;
+  short mpuIntStatus;
+
+  // static MPU9250_DMP* imu = (MPU9250_DMP*) parameter;
+
+  static uint64_t queue_pos = 0;
+  imu_raw_t* imu_reading_p;
+
+  while(1) 
+  {
+    if(queue_pos == IMU_QUEUE_SIZE)
+    {
+        queue_pos = 0;
+    }
+
+    // get INT_STATUS byte
+    mpuIntStatus = imu.getIntStatus();
+    fifoCnt = imu.fifoAvailable();
+    // check for overflow (this should never happen unless our code is too inefficient)
+    if ((mpuIntStatus & 0x10) || fifoCnt == 1024) 
+    {
+    	// reset so we can continue cleanly
+    	imu.resetFifo();
+    	Serial.println(F("FIFO overflow! resetting.."));
+    	Serial.println(F("Enabling FIFO..."));
+      imu.dmpBegin(DMP_FEATURE_6X_LP_QUAT | // Enable 6-axis quat
+                  DMP_FEATURE_GYRO_CAL, // Use gyro calibration
+                  100); // Set DMP FIFO rate to 10 Hz
+    }
+
+
+      //  Serial.println("imuTask() for loop");
+    /* code */
+    if( digitalRead(IMU_INT_PIN) == LOW ) 
+    {
+      fifoCnt = imu.fifoAvailable();
+      if ( fifoCnt == 0 || fifoCnt < 256 )
+      {
+        Serial.printf("fifoCnt %d\n", fifoCnt);
+
+        continue;
+      }
+
+      result = imu.updateFifo();
+      if ( result != INV_SUCCESS) 
+      {
+          Serial.printf("NOT result == INV_SUCCESS %d", result);
+          continue;
+      }
+
+      imu.computeEulerAngles();
+      output = "";
+
+      portENTER_CRITICAL(&mpu_latest_mutex);
+      float q0 = imu.calcQuat(imu.qw);
+      float q1 = imu.calcQuat(imu.qx);
+      float q2 = imu.calcQuat(imu.qy);
+      float q3 = imu.calcQuat(imu.qz);
+
+      imu_reading_p  = &g_imuUpdateList[queue_pos++ % IMU_QUEUE_SIZE];
+      imu_reading_p->q[W] = q0;
+      imu_reading_p->q[X] = q1;
+      imu_reading_p->q[Y] = q2;
+      imu_reading_p->q[Z] = q3;
+
+      imu_reading_p->a[X] = imu.ax;
+      imu_reading_p->a[Y] = imu.ay;
+      imu_reading_p->a[Z] = imu.az;
+
+      imu_reading_p->a[0] = imu.calcAccel(imu.ax);
+      imu_reading_p->a[1] = imu.calcAccel(imu.ay);
+      imu_reading_p->a[2] = imu.calcAccel(imu.az);
+
+      imu_reading_p->g[0] = imu.calcAccel(imu.gx);
+      imu_reading_p->g[1] = imu.calcAccel(imu.gy);
+      imu_reading_p->g[2] = imu.calcAccel(imu.gz);
+
+
+      imu_reading_p->roll = imu.roll;
+      imu_reading_p->pitch = imu.pitch;
+      imu_reading_p->yaw = imu.yaw;
+      imu_reading_p->time = imu.time;
+      imu_reading_p->heading = imu.heading;
+      g_imu_latest = imu_reading_p;
+
+      portEXIT_CRITICAL(&mpu_latest_mutex);
+
+      Serial.println("Q: " + String(q0, 4) + ", " +
+        String(q1, 4) + ", " + String(q2, 4) + 
+        ", " + String(q3, 4));
+      Serial.println("R/P/Y: " + String(imu.roll) + ", "
+                + String(imu.pitch) + ", " + String(imu.yaw));
+      Serial.println("Time: " + String(imu.time) + " ms");
+      Serial.println();
+    
+      Serial.println("Accel: " + String(imu_reading_p->a[0]) + ", " +
+              String(imu_reading_p->a[1]) + ", " + String(imu_reading_p->a[2]) + " g");
+      Serial.println("Gyro: " + String(imu_reading_p->g[0]) + ", " +
+                  String(imu_reading_p->g[1]) + ", " + String(imu_reading_p->g[2]) + " dps");
+      Serial.println("Time: " + String(imu.time) + " ms");
+      Serial.println();
+    }
+  }
+  vTaskDelete(NULL);
+}
+#endif
 

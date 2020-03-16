@@ -1,6 +1,7 @@
 #include "esp_common.h"
 #include "utils.h"
 
+
 #include <TFT_eSPI.h>
 #include <SPI.h>
 #include "WiFi.h"
@@ -13,7 +14,9 @@
 #include <HP20x_dev.h>
 #include <KalmanFilter.h>
 #include <Wire.h>
-#include "mpu.h"
+
+#include "mpu.hpp"
+#include "mpu_icm20948.hpp"
 
 #include "baro.h"
 
@@ -35,14 +38,23 @@ SPIClass spi_SD;
 // set up variables using the SD utility library functions:
 SDMGT sd_mgt(LOG_FILE_PATH);
 
-TaskHandle_t TaskGPS1;
+TaskHandle_t *TaskGPS1;
 TaskHandle_t TaskBaro2;
 TaskHandle_t Task3;
 TaskHandle_t TaskEstimator4;
 
+SemaphoreHandle_t g_xHP206_reading_mutex;
+SemaphoreHandle_t g_i2c_mutex;
+SemaphoreHandle_t g_GPS_reading_mutex;
+
 // static EventGroupHandle_t gps_event_group;
-QueueHandle_t g_gpsQueue;
-std::array<GPSupdate, GPS_QUEUE_SIZE> g_gpsUpdateList;
+static QueueHandle_t g_gpsQueue  = xQueueCreate( GPS_QUEUE_SIZE, sizeof( GPSupdate * ) );
+static QueueHandle_t g_baroQueue = xQueueCreate( BARO_QUEUE_SIZE, sizeof( baro_reading_t * ) );
+
+// QueueHandle_t g_imu_queue;
+
+static std::array<GPSupdate, GPS_QUEUE_SIZE> g_gpsUpdateList;
+static std::array<baro_reading_t, BARO_QUEUE_SIZE> g_baroUpdateList;
 
 float temperature_accumulator, temp_filtered_accumulator;
 float pressure_accumulator, pressure_filtered_accumulator;
@@ -50,11 +62,30 @@ float alti_accumulator, alti_filter_accumulator;
 
 baro_reading_t g_baro_latest;
 volatile bool g_pressure_reading_lock = false;
-SemaphoreHandle_t g_xHP206_reading_mutex;
+
+
+
+
 
 Grove::HP20x_dev HP20x(I2CBUS_ID_HP206);
-std::array<baro_reading_t, BARO_QUEUE_SIZE> g_baroUpdateList;
-QueueHandle_t g_baroQueue;
+
+
+uint32_t timePreviousUs;
+uint32_t timeNowUs;
+float imuTimeDeltaSecs;
+float baroTimeDeltaSecs;
+
+float gpsTimeDeltaSecs;
+volatile uint8_t GPS_interrupt_count = 0;
+portMUX_TYPE GPS_mux = portMUX_INITIALIZER_UNLOCKED;
+
+						// orientation/motion vars
+float q[4];           // [w, x, y, z]         quaternion container
+int   aa[3];         // [x, y, z]            accel sensor measurements
+int   aaReal[3];     // [x, y, z]            gravity-free accel sensor measurements
+int   aaWorld[3];    // [x, y, z]            world-frame accel sensor measurements
+float gravity[3];    // [x, y, z]            gravity vector
+ 
 
 #if MPU_BOLDER
 MPU9250 IMU(spi_IMU, IMU_CS);
@@ -70,7 +101,6 @@ portMUX_TYPE mpu_latest_mutex = portMUX_INITIALIZER_UNLOCKED;
 // std::atomic_flag g_imu_reading_lock = ATOMIC_FLAG_INIT;
 imu_raw_t* g_imu_latest;
 std::array<imu_raw_t, IMU_QUEUE_SIZE> g_imuUpdateList;
-QueueHandle_t g_imu_queue;
 
 
 // bias matrix used later on the altitude estimator
@@ -126,8 +156,8 @@ void writeLog(unsigned long millis, uint8_t month, uint8_t day, uint8_t h, uint8
 
 void updateScreen(float lat, float lon, baro_reading_t* baro_latest)
 {
-    Serial.print("updateScreen() running on core ");
-    Serial.println(xPortGetCoreID());
+    // Serial.print("updateScreen() running on core ");
+    // Serial.println(xPortGetCoreID());
     static uint64_t timeStamp = 0;
     if (millis() - timeStamp > 1000) 
     {
@@ -184,8 +214,121 @@ void setup_soft_serial_gps()
 //  gps_serial.begin(GPSBaud, SWSERIAL_8N1, RXPin, TXPin, false, 95, 11); // RX, TX GPS
   Serial2.begin(GPSBaud, SERIAL_8N1, RX_pin, TX_pin);    //Baud rate, parity mode, RX, TX
 
+  /////////////////////////////////////
+  // Interrupt
+  ////////////////////////////////////
+  
+#ifdef GPS_PPS_INT_ENABLED
+  pinMode(GPS_PPS_PIN, INPUT);
+  attachInterrupt(GPS_PPS_PIN, GPS_PPS_interrupt_handlerISR, FALLING);
+#endif
+
+///////////////////////////
+/// GPS mutex
+g_GPS_reading_mutex = xSemaphoreCreateMutex();
+
   Serial.println(" GPS serial init success");
   espDelay(1000); 
+}
+
+void task_loop_baro_HP206C(void * param)
+{
+  // Serial.print("loop_baro_HP206C() running on core ");
+  // Serial.println(xPortGetCoreID());
+  static long Temper = 0;
+  static long Pressure = 0;
+  static long Altitude = 0;
+  static int cnt = 1;
+  static uint64_t queue_pos = 0;
+  static uint64_t lastComplete = 0;
+
+  // for(;;) 
+  // {
+  if( (millis() - lastComplete) >  1000 / cnt * refresh_rate_baro_hz)
+  {
+    if(OK_HP20X_DEV == hp206_available )
+    { 
+      temperature_accumulator = 0.0;
+      temp_filtered_accumulator = 0.0;
+      alti_accumulator = 0.0;
+      alti_filter_accumulator = 0.0;
+      pressure_accumulator = 0.0;
+      pressure_filtered_accumulator = 0.0;
+
+      for (int i = 0; i < cnt; i++)
+      {
+        Temper = 0;
+        Pressure = 0;
+        Altitude = 0;
+        /* code */
+        //Serial.println("------------------\n");
+        xSemaphoreTake( g_i2c_mutex, portMAX_DELAY );
+        Temper = HP20x.ReadTemperature();
+        //Serial.println("Temper:");
+        temperature_accumulator += Temper/100.0 / (float)cnt;
+        //Serial.print(t);	  
+        //Serial.println("C.");
+        //Serial.println("Filter:");
+
+        temp_filtered_accumulator += t_filter.Filter(Temper/100.0) / (float)cnt;
+        //Serial.print(tf);
+        //Serial.println("C.");
+    
+        Pressure = HP20x.ReadPressure();
+        //Serial.println("Pressure:");
+        pressure_accumulator += Pressure/100.0  / (float)cnt;
+      
+        pressure_filtered_accumulator += p_filter.Filter(Pressure/100.0)  / (float)cnt;
+    
+        Altitude = HP20x.ReadAltitude();
+        xSemaphoreGive( g_i2c_mutex );
+        //Serial.println("Altitude:");
+        alti_accumulator += Altitude/100.0  / (float)cnt;
+        alti_filter_accumulator += a_filter.Filter(Altitude/100.0)  / (float)cnt;
+
+        // 
+      }
+
+      xSemaphoreTake( g_xHP206_reading_mutex, portMAX_DELAY );
+      g_pressure_reading_lock = true;
+      
+      baro_reading_t* reading_p  = &g_baroUpdateList[queue_pos++ % BARO_QUEUE_SIZE];
+
+      reading_p->a = alti_accumulator;
+      reading_p->af = alti_filter_accumulator;
+      reading_p->p = pressure_accumulator;
+      reading_p->pf = pressure_filtered_accumulator;
+      reading_p->t = temperature_accumulator;
+      reading_p->tf = temp_filtered_accumulator;
+      g_baro_latest = *reading_p;
+
+      xQueueSend( g_baroQueue, ( void * ) &reading_p, ( TickType_t ) 0 );
+      g_pressure_reading_lock = false;
+      xSemaphoreGive( g_xHP206_reading_mutex );
+
+      uint64_t diff = millis() - lastComplete;
+      Serial.printf("\n \t\t\t\t\t Last Baro : %u ms ago\n", diff);
+      lastComplete = millis();
+      // delay((1000 / refresh_rate_baro_hz) - 0.1 * (1000 / refresh_rate_baro_hz ));
+
+      // Serial.print( reading_p->p);
+      // Serial.println("hPa.");
+      // Serial.println("Filter:");
+
+      // Serial.print( reading_p->pf);
+      // Serial.println("hPa");
+
+      // Serial.print( reading_p->a);
+      // Serial.println("m. af ");
+      // Serial.println("Filter:");
+      // Serial.print( reading_p->af);
+      // Serial.println("m.");
+      // Serial.println("------------------\n");
+
+      // delay(1000 / (refresh_rate_baro_hz * cnt));
+    } // available
+  } // millis
+  // vTaskDelete( NULL );
 }
 
 void setup_baro_HP206C() 
@@ -208,6 +351,15 @@ void setup_baro_HP206C()
   {
     Serial.println("HP20x_dev isn't available.\n");
   }
+
+  
+  // const esp_timer_create_args_t periodic_timer_args = { &task_loop_baro_HP206C, NULL, ESP_TIMER_TASK, "periodic" };
+  // esp_timer_handle_t periodic_timer;
+  // esp_timer_create(&periodic_timer_args, &periodic_timer);
+  /* The timer has been created but is not running yet */
+
+  /* Start the timers */
+  // esp_timer_start_periodic(periodic_timer, 0.06 * 1000 * 1000);
 }
 
 
@@ -220,14 +372,16 @@ void setup_baro_HP206C()
 
 void setup_I2C_IMU()
 {
-   Wire.begin(SDA_1, SCL_1);
+  Wire.begin(SDA_1, SCL_1);
 }
 
 
 void setup_altitude_estimator()
 {
   // setup_SPI_IMU();
+  #ifdef MPU_9250
   setup_mpu9265(&imu);
+  #endif
 }
 
 void task_altitude_estimator_loop(void * param)
@@ -280,206 +434,47 @@ void task_altitude_estimator_loop(void * param)
       vTaskDelay(100);
     // }
   }
-
   vTaskDelete( NULL );
 }
 
-
-void imuTask()
-{
-  Serial.print("imuTask() running on core ");
-  Serial.println(xPortGetCoreID());
-  // configASSERT(parameter);
-  String output;
-  unsigned short fifoCnt;
-  inv_error_t result;
-
-  // static MPU9250_DMP* imu = (MPU9250_DMP*) parameter;
-
-  static uint64_t queue_pos = 0;
-  imu_raw_t* imu_reading_p;
-
-  // while(1) 
-  // {
-  if(queue_pos == IMU_QUEUE_SIZE)
-  {
-      queue_pos = 0;
-  }
-
-  for (int i = 0; i < 40; i++)
-  {
-    //  Serial.println("imuTask() for loop");
-  /* code */
-
-
-  // if ( digitalRead(IMU_INT_PIN) == LOW ) 
-  // {
-    fifoCnt = imu.fifoAvailable();
-
-    if ( fifoCnt > 0)
-    {
-      // Serial.print("fifoCnt = ");
-      // Serial.println(fifoCnt);
-      result = imu.dmpUpdateFifo();
-
-      // if ( result == INV_SUCCESS) 
-      // {
-        imu.computeEulerAngles();
-        output = "";
-
-        float q0 = imu.calcQuat(imu.qw);
-        float q1 = imu.calcQuat(imu.qx);
-        float q2 = imu.calcQuat(imu.qy);
-        float q3 = imu.calcQuat(imu.qz);
-
-        portENTER_CRITICAL(&mpu_latest_mutex);
-        imu_reading_p  = &g_imuUpdateList[queue_pos++ % IMU_QUEUE_SIZE];
-        imu_reading_p->q[0] = q0;
-        imu_reading_p->q[1] = q1;
-        imu_reading_p->q[2] = q2;
-        imu_reading_p->q[3] = q3;
-        imu_reading_p->roll = imu.roll;
-        imu_reading_p->pitch = imu.pitch;
-        imu_reading_p->yaw = imu.yaw;
-        g_imu_latest = imu_reading_p;
-        portEXIT_CRITICAL(&mpu_latest_mutex);
-
-        Serial.printf("roll %f, pitch %f, yaw %f\n", imu.roll, imu.pitch, imu.yaw);
-
-        //Serial.print(F("Sending: "));
-        //Serial.println(output);
-      // }
-      //  else 
-      // {
-      //   Serial.print("NOT result == INV_SUCCESS ");
-      //   Serial.println(result);
-      //   // vTaskDelay(10);
-      // }
-    }
-   
-   
-  // } 
-  // else 
-  // {
-  //     delay(20);
-  // }
-    // }
-  vTaskDelay(10);
-  }
+void initTime() {
+	timeNowUs = timePreviousUs = micros();
 }
 
-void task_loop_baro_HP206C(void* param)
-{
-  Serial.print("loop_baro_HP206C() running on core ");
-  Serial.println(xPortGetCoreID());
-  static long Temper = 0;
-  static long Pressure = 0;
-  static long Altitude = 0;
-  static uint8_t refresh_rate_baro_hz = 15;
-  static int cnt = 7;
-  static uint64_t queue_pos = 0;
-    // spiffs_setup();
-
-  static int cycles = 0;
-  // for(;;)
-  // {
-      if(OK_HP20X_DEV == hp206_available)
-      { 
-        temperature_accumulator = 0.0;
-        temp_filtered_accumulator = 0.0;
-        alti_accumulator = 0.0;
-        alti_filter_accumulator = 0.0;
-        pressure_accumulator = 0.0;
-        pressure_filtered_accumulator = 0.0;
-
-        for (int i = 0; i < cnt; i++)
-        {
-          
-          Temper = 0;
-          Pressure = 0;
-          Altitude = 0;
-          /* code */
-          //Serial.println("------------------\n");
-          Temper = HP20x.ReadTemperature();
-          //Serial.println("Temper:");
-          temperature_accumulator += Temper/100.0 / (float)cnt;
-          //Serial.print(t);	  
-          //Serial.println("C.");
-          //Serial.println("Filter:");
-
-          temp_filtered_accumulator += t_filter.Filter(Temper/100.0) / (float)cnt;
-          //Serial.print(tf);
-          //Serial.println("C.");
-      
-          Pressure = HP20x.ReadPressure();
-          //Serial.println("Pressure:");
-          pressure_accumulator += Pressure/100.0  / (float)cnt;
-        
-          pressure_filtered_accumulator += p_filter.Filter(Pressure/100.0)  / (float)cnt;
-      
-          Altitude = HP20x.ReadAltitude();
-          //Serial.println("Altitude:");
-          alti_accumulator += Altitude/100.0  / (float)cnt;
-          alti_filter_accumulator += a_filter.Filter(Altitude/100.0)  / (float)cnt;
-        }
-
-        xSemaphoreTake( g_xHP206_reading_mutex, portMAX_DELAY );
-        g_pressure_reading_lock = true;
-        
-        baro_reading_t* reading_p  = &g_baroUpdateList[queue_pos++ % BARO_QUEUE_SIZE];
-
-        reading_p->a = alti_accumulator;
-        reading_p->af = alti_filter_accumulator;
-        reading_p->p = pressure_accumulator;
-        reading_p->pf = pressure_filtered_accumulator;
-        reading_p->t = temperature_accumulator;
-        reading_p->tf = temp_filtered_accumulator;
-        g_baro_latest = *reading_p;
-
-        xQueueSend( g_baroQueue, ( void * ) &reading_p, ( TickType_t ) 0 );
-        g_pressure_reading_lock = false;
-        xSemaphoreGive( g_xHP206_reading_mutex );
-
-        Serial.print( reading_p->p);
-        Serial.println("hPa.");
-        Serial.println("Filter:");
-
-        Serial.print( reading_p->pf);
-        Serial.println("hPa");
-
-        Serial.print( reading_p->a);
-        Serial.println("m. af ");
-        Serial.println("Filter:");
-        Serial.print( reading_p->af);
-        Serial.println("m.");
-        Serial.println("------------------\n");
-        vTaskDelay(1000 / refresh_rate_baro_hz);
-      }
-  // }
-  // vTaskDelete( NULL );
+void updateTime() {
+	timeNowUs = micros();
+	imuTimeDeltaSecs = ((timeNowUs - timePreviousUs) / 1000000.0f);
+	timePreviousUs = timeNowUs;
 }
-
 
 
 void write_log(float* lat, float* lng)
 {
-  Serial.print("write_log() running on core ");
-  Serial.println(xPortGetCoreID());
+  static uint64_t lastComplete = 0;
 
-  configASSERT(lat);
-  configASSERT(lng);
-  static GPSupdate* rxGPS_p;
-  static baro_reading_t* baro_rx_p;
-  if( g_gpsQueue != 0 )
+  if( (millis() - lastComplete) >  50)
+  {
+    // Serial.print("write_log() running on core ");
+    // Serial.println(xPortGetCoreID());
+
+    configASSERT(lat);
+    configASSERT(lng);
+    static GPSupdate* rxGPS_p;
+    static baro_reading_t* baro_rx_p;
+
+    configASSERT(g_baroQueue);
+    configASSERT(g_gpsQueue);
+
+    if( g_gpsQueue && g_baroQueue)
     {
       ESP_LOGI("GPS queue ok");
       // Receive a message on the created queue.  Block for 1000 ticks if a
       // message is not immediately available.
-      BaseType_t baro = xQueueReceive( g_baroQueue, &( baro_rx_p ), ( TickType_t ) 50 );
-      BaseType_t gps = xQueueReceive( g_gpsQueue, &( rxGPS_p ), ( TickType_t ) 50 );
+      BaseType_t baro = xQueueReceive( g_baroQueue, &( baro_rx_p ), ( TickType_t ) 0 );
+      BaseType_t gps = xQueueReceive( g_gpsQueue, &( rxGPS_p ), ( TickType_t ) 0 );
       if(gps)
       {
-         Serial.println("gps logging received");
+        Serial.println("gps logging received");
         // pcRxedMessage now points to the struct AMessage variable posted
         // by vATask.
         if(rxGPS_p != nullptr)
@@ -499,70 +494,202 @@ void write_log(float* lat, float* lng)
               rxGPS_p->s, rxGPS_p->cs,
               rxGPS_p->current_gps_lat, rxGPS_p->current_gps_lng);
           }
-          
+
+          uint64_t diff = millis() - lastComplete;
+          Serial.printf("\n \t\t\t\t\t LOG : %u ms ago\n", diff);
+          lastComplete = millis();
         }
         else
         {
-         ESP_LOGI("xQueueReceive nullptr");
+        ESP_LOGI("xQueueReceive nullptr");
         }
         
       }
       else
       {
-       ESP_LOGI("xQueueReceive nothing");
+      ESP_LOGI("xQueueReceive nothing");
       }
       
     }
+  }
+}
+
+
+
+void Task_GPS_loop(void * pvParameters)
+{
+  Serial.print(F("Task_GPS_loop() running on core "));
+  Serial.print(xPortGetCoreID());
+  Serial.print(F(" Task delay"));
+  Serial.println(GPS_TASK_DELAY);
+
+  static GPSupdate* gps_update_ptr;
+  static uint64_t idx = 0;
+
+
+  // Create a queue capable of containing 10 pointers to AMessage structures.
+  // These should be passed by pointer as they contain a lot of data.
+  static uint64_t lastTime = 0;
+  for(;;)
+  {   
+    //   Serial.print("updateGPSInfo() running on core ");
+    //   Serial.println(xPortGetCoreID());
+
+      /* Block indefinitely (without a timeout, so no need to check the function's
+        return value) to wait for a notification.  Here the RTOS task notification
+        is being used as a binary semaphore, so the notification value is cleared
+        to zero on exit.  NOTE!  Real applications should not block indefinitely,
+        but instead time out occasionally in order to handle error conditions
+        that may prevent the interrupt from sending any more notifications. */
+      portENTER_CRITICAL(&GPS_mux);
+      GPS_interrupt_count = 0;
+      portEXIT_CRITICAL(&GPS_mux);
+
+      if (Serial2.available() > 0)
+      {
+        // Serial.println("Serial2.available()");
+        if (gps.encode(Serial2.read()))
+        {
+          if (gps.location.isValid() && gps.location.isUpdated())
+          {
+            Serial.print(gps.location.lat(), 6);
+            Serial.print(F(","));
+            Serial.print(gps.location.lng(), 6);
+            gps_update_ptr = &g_gpsUpdateList[idx++ % GPS_QUEUE_SIZE];
+            gps_update_ptr->current_gps_lat = gps.location.lat();
+            // s += F(",");
+            gps_update_ptr->current_gps_lng = gps.location.lng();
+
+            if(gps.date.isValid())
+            {
+              Serial.print(gps.date.month());
+              Serial.print(F("/"));
+              Serial.print(gps.date.day());
+              Serial.print(F("/"));
+              Serial.print(gps.date.year());
+
+              gps_update_ptr->day = gps.date.day();
+              gps_update_ptr->month = gps.date.month();
+            }
+
+            Serial.print(F(" "));
+            if(gps.time.isValid())
+            {
+              // if (gps.time.hour() < 10) Serial.print(F("0"));
+              // Serial.print(gps.time.hour());
+              // Serial.print(F(":"));
+              // if (gps.time.minute() < 10) Serial.print(F("0"));
+              // Serial.print(gps.time.minute());
+              // Serial.print(F(":"));
+              // if (gps.time.second() < 10) Serial.print(F("0"));
+              // Serial.print(gps.time.second());
+              // Serial.print(F("."));
+              // if (gps.time.centisecond() < 10) Serial.print(F("0"));
+              // Serial.print(gps.time.centisecond());
+              // Serial.println(F(""));
+
+              gps_update_ptr->h = gps.time.hour();
+              gps_update_ptr->min = gps.time.minute();
+              gps_update_ptr->s = gps.time.second();
+              gps_update_ptr->cs = gps.time.centisecond();
+              gps_update_ptr->timestamp = millis();
+
+              uint64_t diff = millis() - lastTime;
+              Serial.printf("\n\t\t\t\t\t\t\t\tLast GPS : %u ms ago\n\n\n", diff);
+              lastTime = millis(); 
+               
+              // Send a pointer to a struct AMessage object.  Don't block if the
+              // queue is already full.
+              configASSERT(g_gpsQueue);
+              configASSERT(gps_update_ptr);
+              configASSERT(&gps_update_ptr);
+              xQueueSend( g_gpsQueue, ( void * ) &gps_update_ptr, ( TickType_t ) 0 );
+              // YIELD here since we have a ready the next one should be in almost a second since GPS running at 1HZ update rate
+              delay(1000 / GPS_REFRESH_RATE_HZ);
+            }
+            else
+            {
+              Serial.print(F("INVALID TIME/DATE"));
+            }
+            // s += String(gps.location.lng(), 6);
+          }
+          else
+          {
+            // Serial.print(F("INVALID FIX"));
+          }
+          // printGPSInfo();
+        } else {
+          // Serial.println("NOT GPS location is updated!");
+        }
+      } else {
+          // Serial.println("NOT Serial2.available()!");
+      }
+      
+     
+    // } // MILLIS
+
+    if (millis() > 5000 && gps.charsProcessed() < 10)
+    {
+      Serial.println(F("No GPS detected: check wiring."));
+      // showTFTMessage("No GPS detected: check wiring.");
+      delay(1000 / GPS_REFRESH_RATE_HZ);
+    }
+    // vTaskDelay(2);
+  } // for
+  vTaskDelete(NULL);
 }
 
 void task_update_screen(void* param)
 {
+  static uint64_t lastTime = 0;
+
   Serial.print("task_update_screen() running on core ");
-  Serial.println(xPortGetCoreID());
+  Serial.print(xPortGetCoreID());
+  Serial.print(F(" Task delay"));
+  Serial.println(SCREEN_TASK_DELAY);
 
   static float local_lat = 0;
   static float local_lng = 0; // used for screen update
   uint cycle = 0;
+
+ 
   for(;;)
   {
-     
+    
     switch(cycle)
     {
       case 0:
         // getIMUBolderInterrupt();
-        vTaskDelay(200);
+        // delay(0.1 * 1000); 
+        // portYIELD();
         cycle++;
       break;
 
       case 1:
-       imuTask();
-       cycle++;
-       break;
-
-      case 2:
         write_log(&local_lat, &local_lng);
         cycle++;
       break;
 
-      case 3:
+      case 2:
         task_loop_baro_HP206C(0);
         cycle++;
       break;
 
-      case 4:
+      case 3:
         updateScreen(local_lat, local_lng, &g_baro_latest);
         cycle++;
       break;
 
-      case 5:
+      case 4:
         cycle = 0;
       break;
     }
-   
 
-    
+    uint64_t diff = millis() - lastTime; 
+    // Serial.printf("\nLast task_update_screen : %u ms ago\n", diff);
+    lastTime = millis(); 
+    vTaskDelay(2);
   }
-  
   vTaskDelete( NULL );
 }
 
@@ -652,13 +779,18 @@ void wifi_scan()
 }
 
 
+void mpu_imu_task(void* param) 
+{
+  MPU_20948::imu_task(param);
+}
+
 
 void setup()
 {
   Serial.begin(115200);
   ESP_LOGD(TAG_MAIN, F("setup()"));
 
-  g_gpsQueue = xQueueCreate( GPS_QUEUE_SIZE, sizeof( GPSupdate * ) );
+  // g_gpsQueue = xQueueCreate( GPS_QUEUE_SIZE, sizeof( GPSupdate * ) );
   if( g_gpsQueue == 0 )
   {
     ESP_LOGE(GPS, "failed to created gps queue");
@@ -667,8 +799,8 @@ void setup()
   {
     ESP_LOGI(GPS, "GPS queue created ok");
   }
-
-  g_baroQueue = xQueueCreate( BARO_QUEUE_SIZE, sizeof( baro_reading_t * ) );
+  
+  // g_baroQueue = xQueueCreate( BARO_QUEUE_SIZE, sizeof( baro_reading_t * ) );
   if( g_baroQueue == 0 )
   {
     ESP_LOGE(BARO_TAG, "failed to created barometer queue");
@@ -714,59 +846,55 @@ void setup()
       Serial.println("Default Vref: 1100mV");
   }
 
-
+  g_i2c_mutex = xSemaphoreCreateMutex();
   setup_sd_card();
   setup_altitude_estimator();
 
   setup_soft_serial_gps();
   setup_baro_HP206C(); 
+  setup_I2C_IMU();
 
+  delay(5000); 
 
-  // if (!SPIFFS.begin(true)) 
-  // {
-  //   Serial.println("An Error has occurred while mounting SPIFFS");
-  //   return;
-  // }
+ 
 
-    
-  espDelay(1000); 
-     //create a task that will be executed in the Task1code() function, with priority 1 and executed on core 0
+  
   xTaskCreatePinnedToCore(
-                    getCurrentGPSInfo,   /* Task function. */
-                    "Task1GPS",     /* name of task. */
-                    5000,       /* Stack size of task */
-                    NULL,        /* parameter of the task */
-                    1,           /* priority of the task */
-                    &TaskGPS1,      /* Task handle to keep track of created task */
-                    0);          /* pin task to core 0 */     
+                      Task_GPS_loop,   /* Task function. */
+                      "Task1GPS",     /* name of task. */
+                      5000,       /* Stack size of task */
+                      NULL,        /* parameter of the task */
+                      2,           /* priority of the task */
+                      TaskGPS1,      /* Task handle to keep track of created task */
+                      0);          /* pin task to core 0 */     
 
   // xTaskCreatePinnedToCore(
-  //   task_loop_baro_HP206C,   /* Task function. */
-  //   "Task2Baro",     /* name of task. */
-  //   5000,       /* Stack size of task */
-  //   NULL,        /* parameter of the task */
-  //   1,           /* priority of the task */
-  //   &TaskBaro2,      /* Task handle to keep track of created task */
-  //   0);          /* pin task to core 1 */
+  //                     task_loop_baro_HP206C,   /* Task function. */
+  //                     "Task2Baro",     /* name of task. */
+  //                     5000,       /* Stack size of task */
+  //                     NULL,        /* parameter of the task */
+  //                     2,           /* priority of the task */
+  //                     &TaskBaro2,      /* Task handle to keep track of created task */
+  //                     1);          /* pin task to core 1 */
 
   xTaskCreatePinnedToCore(
                     task_update_screen,   /* Task function. */
                     "Task3Screen",     /* name of task. */
-                    20000,       /* Stack size of task */
+                    10000,       /* Stack size of task */
                     NULL,        /* parameter of the task */
-                    2,           /* priority of the task */
+                    3,           /* priority of the task */
                     &Task3,      /* Task handle to keep track of created task */
                     1);          /* pin task to core 1 */
 
 
   // xTaskCreatePinnedToCore(
-  //                 task_altitude_estimator_loop,   /* Task function. */
+  //                 mpu_imu_task,   /* Task function. */
   //                 "Task4IMU",     /* name of task. */
   //                 10000,       /* Stack size of task */
   //                 NULL,        /* parameter of the task */
   //                 2,           /* priority of the task */
-  //                 &TaskEstimator4  ,0    /* Task handle to keep track of created task */
-// );          /* pin task to core 1 */
+  //                 &TaskEstimator4  ,   /* Task handle to keep track of created task */
+  //                 1);          /* pin task to core 1 */
 }
 
 void loop()

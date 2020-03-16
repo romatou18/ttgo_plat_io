@@ -7,24 +7,24 @@
 #include <Streaming.h>
 
 
-
 typedef struct
 {
-  volatile float current_gps_lat = 0.0;
-  volatile float current_gps_lng = 0.0;
-  volatile uint8_t day, month;
-  volatile uint8_t h, s, cs, min;
+  float current_gps_lat = 0.0;
+  float current_gps_lng = 0.0;
+  uint8_t day, month;
+  uint8_t h, s, cs, min;
+  uint64_t timestamp = 0;
 } GPSupdate;
-
 
 extern TinyGPSPlus gps;
 extern const uint32_t GPSBaud;
 extern float current_gps_lat;
 extern float current_gps_lng;
+// extern SemaphoreHandle_t g_GPS_reading_mutex;
+extern volatile uint8_t GPS_interrupt_count;
+extern portMUX_TYPE GPS_mux;
 
-extern QueueHandle_t g_gpsQueue;
-#define GPS_QUEUE_SIZE 2
-extern std::array<GPSupdate, GPS_QUEUE_SIZE> g_gpsUpdateList;
+// extern std::array<GPSupdate, GPS_QUEUE_SIZE> g_gpsUpdateList;
 
 
 
@@ -81,104 +81,47 @@ void printGPSInfo()
   Serial.println();
 }
 
-void getCurrentGPSInfo(void * pvParameters)
+
+//ISR for PPS interrupt
+void IRAM_ATTR GPS_PPS_interrupt_handlerISR() {
+  BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+  portENTER_CRITICAL_ISR(&GPS_mux);
+  GPS_interrupt_count++;
+  portEXIT_CRITICAL_ISR(&GPS_mux);
+  /* Force a context switch if xHigherPriorityTaskWoken is now set to pdTRUE.
+  The macro used to do this is dependent on the port and may be called
+  portEND_SWITCHING_ISR. */
+  // portYIELD_FROM_ISR();
+}  
+
+/* An interrupt handler.  The interrupt handler does not perform any processing,
+instead it unblocks a high priority task in which the event that generated the
+interrupt is processed.  If the priority of the task is high enough then the
+interrupt will return directly to the task (so it will interrupt one task but
+return to a different task), so the processing will occur contiguously in time -
+just as if all the processing had been done in the interrupt handler itself. */
+void GPS_PPS_interrupt_handlerISR_BAK( void )
 {
-  static GPSupdate* gps_update_ptr;
-  static uint64_t idx = 0;
+  BaseType_t xHigherPriorityTaskWoken = pdFALSE;
 
-  Serial.print("updateGPSInfo() running on core ");
-  Serial.println(xPortGetCoreID());
+    /* Clear the interrupt. */
 
-  // Create a queue capable of containing 10 pointers to AMessage structures.
-  // These should be passed by pointer as they contain a lot of data.
-  // static uint64_t timeStamp = 0;
-  for(;;)
-  {
-    // Serial.print("updateGPSInfo() running on core ");
-    // Serial.println(xPortGetCoreID());
-    // if (millis() - timeStamp > 500) 
-    // {
-    //   timeStamp = millis();  
-      if (Serial2.available() > 0)
-      {
-        // Serial.println("Serial2.available()");
-        if (gps.encode(Serial2.read()))
-        {
-          if (gps.location.isValid() && gps.location.isUpdated())
-          {
-            Serial.print(gps.location.lat(), 6);
-            Serial.print(F(","));
-            Serial.print(gps.location.lng(), 6);
-            gps_update_ptr = &g_gpsUpdateList[idx++ % GPS_QUEUE_SIZE];
-            gps_update_ptr->current_gps_lat = gps.location.lat();
-            // s += F(",");
-            gps_update_ptr->current_gps_lng = gps.location.lng();
+    /* xHigherPriorityTaskWoken must be initialised to pdFALSE.  If calling
+    vTaskNotifyGiveFromISR() unblocks the handling task, and the priority of
+    the handling task is higher than the priority of the currently running task,
+    then xHigherPriorityTaskWoken will automatically get set to pdTRUE. */
 
-            if(gps.date.isValid())
-            {
-              Serial.print(gps.date.month());
-              Serial.print(F("/"));
-              Serial.print(gps.date.day());
-              Serial.print(F("/"));
-              Serial.print(gps.date.year());
+    /* Unblock the handling task so the task can perform any processing necessitated
+    by the interrupt.  xHandlingTask is the task's handle, which was obtained
+    when the task was created. */
 
-              gps_update_ptr->day = gps.date.day();
-              gps_update_ptr->month = gps.date.month();
-            }
+//     if(TaskGPS1) {
+//       vTaskNotifyGiveFromISR( &TaskGPS1, &xHigherPriorityTaskWoken );
 
-            Serial.print(F(" "));
-            if(gps.time.isValid())
-            {
-              if (gps.time.hour() < 10) Serial.print(F("0"));
-              Serial.print(gps.time.hour());
-              Serial.print(F(":"));
-              if (gps.time.minute() < 10) Serial.print(F("0"));
-              Serial.print(gps.time.minute());
-              Serial.print(F(":"));
-              if (gps.time.second() < 10) Serial.print(F("0"));
-              Serial.print(gps.time.second());
-              Serial.print(F("."));
-              if (gps.time.centisecond() < 10) Serial.print(F("0"));
-              Serial.print(gps.time.centisecond());
-              Serial.println(F(""));
-
-              gps_update_ptr->h = gps.time.hour();
-              gps_update_ptr->min = gps.time.minute();
-              gps_update_ptr->s = gps.time.second();
-              gps_update_ptr->cs = gps.time.centisecond();
-              // Send a pointer to a struct AMessage object.  Don't block if the
-              // queue is already full.
-              xQueueSend( g_gpsQueue, ( void * ) &gps_update_ptr, ( TickType_t ) 0 );
-              vTaskDelay(400);
-            }
-            else
-            {
-              Serial.print(F("INVALID TIME/DATE"));
-            }
-            // s += String(gps.location.lng(), 6);
-          }
-          else
-          {
-            // Serial.print(F("INVALID FIX"));
-          }
-
-        
-          // printGPSInfo();
-        } else {
-          // Serial.println("NOT GPS location is updated!");
-        }
-      } else {
-          // Serial.println("NOT Serial2.available()!");
-      }
-        
-      if (millis() > 5000 && gps.charsProcessed() < 10)
-      {
-        Serial.println(F("No GPS detected: check wiring."));
-    //    showTFTMessage("No GPS detected: check wiring.");
-        espDelay(500);
-      }
-    // }
-    
-  }
-  vTaskDelete(NULL);
+//       /* Force a context switch if xHigherPriorityTaskWoken is now set to pdTRUE.
+//       The macro used to do this is dependent on the port and may be called
+//       portEND_SWITCHING_ISR. */
+//       portYIELD_FROM_ISR();
+//     }
 }
+
