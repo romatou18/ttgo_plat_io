@@ -14,6 +14,7 @@ extern SemaphoreHandle_t g_i2c_mutex;
 class MPU_20948 
 {
     public:
+    static portMUX_TYPE mpu_latest_mutex;
     static constexpr int IMU_LOOP_DELAY_MS = 2;
     static FusionBias fusionBias;
     static FusionAhrs fusionAhrs;
@@ -63,14 +64,15 @@ class MPU_20948
         }
     }
 
-    static void imu_task(void* param)
+    static bool init_imu(void)
     {
         xSemaphoreTake( g_i2c_mutex, portMAX_DELAY );
 
-        int r = myICM.begin(true, 0, SDA_1, SCL_1, 400000);
+        int r = myICM.begin(true, 0, SDA_1, SCL_1, SD_SPEED);
         if (r < 0)
         {
             ESP_LOGE(TAG, "Not connected %d\n", r);
+            return false;
         }
 
         // Set Gyro and Accelerometer to a particular sample mode
@@ -80,13 +82,13 @@ class MPU_20948
         // Set full scale ranges for both acc and gyr
         ICM_20948_fss_t myFSS;  // This uses a "Full Scale Settings" structure that can contain values for all configurable sensors
 
-        myFSS.a = gpm16;         // (ICM_20948_ACCEL_CONFIG_FS_SEL_e)
+        myFSS.a = ICM_20948_ACCEL_SENSITITY;         // (ICM_20948_ACCEL_CONFIG_FS_SEL_e)
         // gpm2
         // gpm4
         // gpm8
         // gpm16
 
-        myFSS.g = dps2000;       // (ICM_20948_GYRO_CONFIG_1_FS_SEL_e)
+        myFSS.g = ICM_20948_GYRO_RANGE;       // (ICM_20948_GYRO_CONFIG_1_FS_SEL_e)
         // dps250
         // dps500
         // dps1000
@@ -122,19 +124,10 @@ class MPU_20948
         myICM.enableDLPF( ICM_20948_Internal_Gyr, true );
 
         xSemaphoreGive( g_i2c_mutex );
-
+        
         delay(100);
 
-        const esp_timer_create_args_t periodic_timer_args = { &MPU_20948::periodic_timer_callback, NULL, ESP_TIMER_TASK, "periodic" };
-
-        esp_timer_handle_t periodic_timer;
-        esp_timer_create(&periodic_timer_args, &periodic_timer);
-        /* The timer has been created but is not running yet */
-
-        /* Start the timers */
-        esp_timer_start_periodic(periodic_timer, samplePeriod * 1000 * 1000);
-
-        // Initialise gyroscope bias correction algorithm
+          // Initialise gyroscope bias correction algorithm
         FusionBiasInitialise(&fusionBias, 1.5f, 0.003f); // stationary threshold = 0.5 degrees per second
 
         // Initialise AHRS algorithm
@@ -145,16 +138,33 @@ class MPU_20948
 
         // The contents of this do while loop should be called for each time new sensor measurements are available
         // put your main code here, to run repeatedly:
+        return true;
+    }
 
-        //Groupe 3
-        do {
-            delay(2);
-        } while(true);
-        /* Clean up and finish the example */
-        esp_timer_stop(periodic_timer);
-        esp_timer_delete(periodic_timer);
-        // TaskEstimator4() 
-        vTaskDelete(NULL);
+    static void imu_task(void* param)
+    {
+        MPU_20948::periodic_timer_callback(nullptr);
+
+        // const esp_timer_create_args_t periodic_timer_args =
+        //  { &MPU_20948::periodic_timer_callback, NULL, ESP_TIMER_TASK, "periodic" };
+
+        // esp_timer_handle_t periodic_timer;
+        // esp_timer_create(&periodic_timer_args, &periodic_timer);
+        // /* The timer has been created but is not running yet */
+
+        // /* Start the timers */
+        // esp_timer_start_periodic(periodic_timer, samplePeriod * 1000 * 1000);
+
+      
+        // //Groupe 3
+        // do {
+        //     delay(2);
+        // } while(true);
+        // /* Clean up and finish the example */
+        // esp_timer_stop(periodic_timer);
+        // esp_timer_delete(periodic_timer);
+        // // TaskEstimator4() 
+        // vTaskDelete(NULL);
     }
 
 
@@ -164,23 +174,39 @@ class MPU_20948
         static int n = 0;
         static int64_t last_time = esp_timer_get_time();
 
-        xSemaphoreTake( g_i2c_mutex, portMAX_DELAY );
+        int64_t meas_start, meas_end;
+        if (! xSemaphoreTake( g_i2c_mutex, 10 / portTICK_PERIOD_MS ))
+        {
+            return;
+        }
+
+        // if(! myICM.dataReady())
+        // {
+        //     xSemaphoreGive( g_i2c_mutex );
+        //     return;
+        // }
+
+        meas_start = esp_timer_get_time();
+        // TODO : add interrupt handly data ready.
         myICM.getAGMT();
+        meas_end = esp_timer_get_time();
         xSemaphoreGive( g_i2c_mutex );
 
-        // Calibrate gyroscope
+        printf("getAGMT : %f ms\n", (double)(meas_end - meas_start) / 1000.0);
+
+        // retrieve gyroscope
         FusionVector3 uncalibratedGyroscope = {
             .axis = { myICM.gyrX(), myICM.gyrY(), myICM.gyrZ() } /* replace this value with actual gyroscope x,y,z axis measurement in lsb */
         };
         FusionVector3 calibratedGyroscope = FusionCalibrationInertial(uncalibratedGyroscope, FUSION_ROTATION_MATRIX_IDENTITY, gyroscopeSensitivity, FUSION_VECTOR3_ZERO);
 
-        // Calibrate accelerometer
+        // retrieve accelerometer
         FusionVector3 uncalibratedAccelerometer = {
             .axis = { myICM.accX(), myICM.accY(), myICM.accZ()}/* replace this value with actual accelerometer x,y,z axis measurement in lsb */
         };
         FusionVector3 calibratedAccelerometer = FusionCalibrationInertial(uncalibratedAccelerometer, FUSION_ROTATION_MATRIX_IDENTITY, accelerometerSensitivity, FUSION_VECTOR3_ZERO);
 
-        // Calibrate magnetometer
+        // retrieve magnetometer
         FusionVector3 uncalibratedMagnetometer = {
             .axis = { myICM.magX(), myICM.magY(), myICM.magZ()} /* replace this value with actual magnetometer x axis measurement in uT */
         };
@@ -196,48 +222,51 @@ class MPU_20948
         n++;
         */
 
-        FusionVector3 calibratedMagnetometer = FusionCalibrationMagnetic(uncalibratedMagnetometer, FUSION_ROTATION_MATRIX_IDENTITY, hardIronBias);
+        FusionVector3 calibratedMagnetometer =
+        FusionCalibrationMagnetic(uncalibratedMagnetometer, FUSION_ROTATION_MATRIX_IDENTITY, hardIronBias);
 
+        int64_t ahrs_start, ahrs_end;
+        ahrs_start = esp_timer_get_time();
         // Update gyroscope bias correction algorithm
         calibratedGyroscope = FusionBiasUpdate(&fusionBias, calibratedGyroscope);
 
         int64_t time_since_boot = esp_timer_get_time();
-
         double time = (time_since_boot - last_time) / 1000000.;
         last_time = time_since_boot;
+
         // Update AHRS algorithm
         FusionAhrsUpdate(&fusionAhrs, calibratedGyroscope, calibratedAccelerometer, calibratedMagnetometer, time);
-
         // Print Euler angles
         FusionEulerAngles eulerAngles = FusionQuaternionToEulerAngles(FusionAhrsGetQuaternion(&fusionAhrs));
 
         //Compute Velocity and Posiiton
         FusionVector3 acc = FusionAhrsGetEarthAcceleration(&fusionAhrs);
-
         FusionVector3 at = FusionVectorMultiplyScalar(acc, time);
-        velocity = FusionVectorAdd(velocity, at);
 
+        velocity = FusionVectorAdd(velocity, at);
 
         FusionVector3 att = FusionVectorMultiplyScalar(at, time);
         FusionVector3 att2 = FusionVectorMultiplyScalar(att, 0.5f);
-
         position = FusionVectorAdd(position, att2);
 
         FusionVector3 vt = FusionVectorMultiplyScalar(velocity, time);
         position = FusionVectorAdd(position, vt);
 
+        ahrs_end = esp_timer_get_time();
+        printf("AHRS comp : %f ms\n", (double)(ahrs_end - ahrs_start) / 1000.0);
+
         if (n >= 10)
         {
             n = 0;
             //printf("%f\n", time);
-            // printf("Roll = %0.1f, Pitch = %0.1f, Yaw = %0.1f\r\n", eulerAngles.angle.roll, eulerAngles.angle.pitch, eulerAngles.angle.yaw);
+            printf("Roll = %0.1f, Pitch = %0.1f, Yaw = %0.1f\r\n", eulerAngles.angle.roll, eulerAngles.angle.pitch, eulerAngles.angle.yaw);
             printf("ax = %0.1f, ay = %0.1f, Yaw = %f\r\n", acc.axis.x, acc.axis.y, eulerAngles.angle.yaw);
             // printf("vx = %f, vy = %f, Yaw = %f\r\n", velocity.axis.x, velocity.axis.y, eulerAngles.angle.yaw);
             // printf("x = %f, y = %f, Yaw = %f\r\n", position.axis.x, position.axis.y, eulerAngles.angle.yaw);
             // printf("%f;%f;%f\n", position.axis.x, position.axis.y, eulerAngles.angle.yaw);
         }
         n++;
-        delay(IMU_LOOP_DELAY_MS);
+        // delay(IMU_LOOP_DELAY_MS);
     }
 };
 
