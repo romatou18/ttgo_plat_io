@@ -18,6 +18,9 @@
 #include "mpu.hpp"
 #include "mpu_icm20948.hpp"
 
+#include <TaskScheduler.h>
+#include <TaskSchedulerDeclarations.h>
+
 #include "baro.h"
 
 #include "gps_manager.h"
@@ -38,10 +41,46 @@ SPIClass spi_SD;
 // set up variables using the SD utility library functions:
 SDMGT sd_mgt(LOG_FILE_PATH);
 
-TaskHandle_t *TaskGPS1;
-TaskHandle_t TaskBaro2;
-TaskHandle_t Task3;
-TaskHandle_t TaskEstimator4;
+/*********************************
+// Callback methods prototypes
+*********************************/
+// Task runner
+StatusRequest imu_measure_notification;
+Scheduler runner, hts;
+
+//Sensors Callbacks
+void Task_GPS_loop();
+void task_loop_baro_HP206C_cb();
+
+void task_imu_cb();
+bool task_imu_enable_cb();
+void task_update_screen_cb();
+void task_log_cb();
+
+//Calculation tasks
+void alti_estimator_cb();
+    // INLINE Task(unsigned long aInterval=0,
+    //  long aIterations=0,
+    //   TaskCallback aCallback=NULL,
+    //    Scheduler* aScheduler=NULL, 
+    //    bool aEnable=false, 
+    //    TaskOnEnable aOnEnable=NULL,
+    //     TaskOnDisable aOnDisable=NULL);
+
+// Task scheduler handles
+Task task_handle_gps(GPS_PERIOD, TASK_FOREVER, &Task_GPS_loop, NULL, false, NULL, NULL);
+Task task_handle_update_screen(SCREEN_UPDATE_PERIOD, TASK_FOREVER, &task_update_screen_cb
+, NULL, false, NULL, NULL);
+
+Task task_imu(IMU_PERIOD, TASK_FOREVER, &task_imu_cb, NULL, false,
+ &task_imu_enable_cb, NULL);
+
+Task task_handle_baro(BARO_PERIOD, TASK_FOREVER, &task_loop_baro_HP206C_cb
+, NULL, false, NULL, NULL);
+
+Task task_handle_log(LOG_PERIOD, TASK_FOREVER, &task_log_cb, NULL, false, NULL, NULL);
+
+xTaskHandle Task1_core0;
 
 SemaphoreHandle_t g_xHP206_reading_mutex;
 SemaphoreHandle_t g_i2c_mutex;
@@ -59,6 +98,9 @@ static std::array<baro_reading_t, BARO_QUEUE_SIZE> g_baroUpdateList;
 float temperature_accumulator, temp_filtered_accumulator;
 float pressure_accumulator, pressure_filtered_accumulator;
 float alti_accumulator, alti_filter_accumulator;
+
+static float local_lat = 0;
+static float local_lng = 0; // used for screen update
 
 baro_reading_t g_baro_latest;
 volatile bool g_pressure_reading_lock = false;
@@ -185,23 +227,21 @@ void updateScreen(float lat, float lon, baro_reading_t* baro_latest)
 
       if(g_pressure_reading_lock == false)
       {
-        String p_info = String(g_baro_latest.p, 2) +" hpa   ";
-        // sprintf(info, "%f hpa   ", p);
+        String p_info = String(g_baro_latest.p, 2) 
+          + " " + String(g_baro_latest.pf, 2) + F("hpa/hf");
         tft.drawString(p_info, wp, yb + tft.height()* vh);
         vh += vinc;
-        // sprintf(info, "%f fhpa  ", pf);
-        String pf_info = String(g_baro_latest.pf, 2) +" hpaf   ";
-        tft.drawString(pf_info, wp, (int)(yb + tft.height()* vh));
-        vh += vinc;
+        // String pf_info = String(g_baro_latest.pf, 2) + F(" hpaf   ");
+        // tft.drawString(pf_info, wp, (int)(yb + tft.height()* vh));
+        // vh += vinc;
         
-        // sprintf(info, "%f m    ", a);
-        String a_info = String(g_baro_latest.a, 2) +" m   ";
+        String a_info = String(g_baro_latest.a, 2) + " " +
+        String(g_baro_latest.af, 2) + F(" m/f");
         tft.drawString(a_info, wp, (int)(yb + tft.height()* vh));
         vh += vinc;
-        // sprintf(info, "%f fm    ", af);
-        String af_info = String(g_baro_latest.af, 2) +" mf   ";
-        tft.drawString(af_info, wp, (int)(yb + tft.height()* vh));
-        vh += vinc;
+        // String af_info = String(g_baro_latest.af, 2) +" mf   ";
+        // tft.drawString(af_info, wp, (int)(yb + tft.height()* vh));
+        // vh += vinc;
       }
     }
 }
@@ -231,7 +271,7 @@ g_GPS_reading_mutex = xSemaphoreCreateMutex();
   espDelay(1000); 
 }
 
-void task_loop_baro_HP206C(void * param)
+void task_loop_baro_HP206C_cb()
 {
   // Serial.print("loop_baro_HP206C() running on core ");
   // Serial.println(xPortGetCoreID());
@@ -244,8 +284,8 @@ void task_loop_baro_HP206C(void * param)
 
   // for(;;) 
   // {
-  if( (millis() - lastComplete) >  1000 / cnt * refresh_rate_baro_hz)
-  {
+  // if( (millis() - lastComplete) >  1000 / cnt * refresh_rate_baro_hz)
+  // {
     if(OK_HP20X_DEV == hp206_available )
     { 
       temperature_accumulator = 0.0;
@@ -327,7 +367,7 @@ void task_loop_baro_HP206C(void * param)
 
       // delay(1000 / (refresh_rate_baro_hz * cnt));
     } // available
-  } // millis
+  // } // millis
   // vTaskDelete( NULL );
 }
 
@@ -372,7 +412,7 @@ void setup_baro_HP206C()
 
 void setup_I2C_IMU()
 {
-  Wire.begin(SDA_1, SCL_1);
+  Wire.begin(21, 22);
 }
 
 
@@ -452,8 +492,8 @@ void write_log(float* lat, float* lng)
 {
   static uint64_t lastComplete = 0;
 
-  if( (millis() - lastComplete) >  50)
-  {
+  // if( (millis() - lastComplete) >  50)
+  // {
     // Serial.print("write_log() running on core ");
     // Serial.println(xPortGetCoreID());
 
@@ -470,8 +510,8 @@ void write_log(float* lat, float* lng)
       ESP_LOGI("GPS queue ok");
       // Receive a message on the created queue.  Block for 1000 ticks if a
       // message is not immediately available.
-      BaseType_t baro = xQueueReceive( g_baroQueue, &( baro_rx_p ), ( TickType_t ) 0 );
-      BaseType_t gps = xQueueReceive( g_gpsQueue, &( rxGPS_p ), ( TickType_t ) 0 );
+      BaseType_t baro = xQueueReceive( g_baroQueue, &( baro_rx_p ), ( TickType_t ) 10 );
+      BaseType_t gps = xQueueReceive( g_gpsQueue, &( rxGPS_p ), ( TickType_t ) 10 );
       if(gps)
       {
         Serial.println("gps logging received");
@@ -496,7 +536,7 @@ void write_log(float* lat, float* lng)
           }
 
           uint64_t diff = millis() - lastComplete;
-          Serial.printf("\n \t\t\t\t\t LOG : %u ms ago\n", diff);
+          Serial.printf("\n \t\t\t\t\t\t\t\t\t\t LOG : %u ms ago\n", diff);
           lastComplete = millis();
         }
         else
@@ -511,12 +551,17 @@ void write_log(float* lat, float* lng)
       }
       
     }
-  }
+  // }
+}
+
+void task_log_cb()
+{
+  write_log(&local_lat, &local_lng);
 }
 
 
 
-void Task_GPS_loop(void * pvParameters)
+void Task_GPS_loop()
 {
   Serial.print(F("Task_GPS_loop() running on core "));
   Serial.print(xPortGetCoreID());
@@ -530,7 +575,7 @@ void Task_GPS_loop(void * pvParameters)
   // Create a queue capable of containing 10 pointers to AMessage structures.
   // These should be passed by pointer as they contain a lot of data.
   static uint64_t lastTime = 0;
-  for(;;)
+  while(Serial2.available() > 0)
   {   
     //   Serial.print("updateGPSInfo() running on core ");
     //   Serial.println(xPortGetCoreID());
@@ -605,7 +650,7 @@ void Task_GPS_loop(void * pvParameters)
               configASSERT(&gps_update_ptr);
               xQueueSend( g_gpsQueue, ( void * ) &gps_update_ptr, ( TickType_t ) 0 );
               // YIELD here since we have a ready the next one should be in almost a second since GPS running at 1HZ update rate
-              delay(1000 / GPS_REFRESH_RATE_HZ);
+              return;
             }
             else
             {
@@ -633,66 +678,44 @@ void Task_GPS_loop(void * pvParameters)
       Serial.println(F("No GPS detected: check wiring."));
       // showTFTMessage("No GPS detected: check wiring.");
       delay(1000 / GPS_REFRESH_RATE_HZ);
+      return;
     }
     // vTaskDelay(2);
   } // for
-  vTaskDelete(NULL);
 }
 
-void task_update_screen(void* param)
+void task_update_screen_cb()
 {
-  static uint64_t lastTime = 0;
+    Serial.print("task_update_screen() running on core ");
+    Serial.print(xPortGetCoreID());
+    Serial.print(F(" Task delay"));
+    Serial.println(SCREEN_TASK_DELAY);
 
-  Serial.print("task_update_screen() running on core ");
-  Serial.print(xPortGetCoreID());
-  Serial.print(F(" Task delay"));
-  Serial.println(SCREEN_TASK_DELAY);
+    updateScreen(local_lat, local_lng, &g_baro_latest);
+}
 
-  static float local_lat = 0;
-  static float local_lng = 0; // used for screen update
-  uint cycle = 0;
+void task_imu_cb() 
+{
+  MPU_20948::imu_task(0);
+}
 
- 
+bool task_imu_enable_cb()
+{
+  return MPU_20948::init_imu();
+}
+
+void Task_core0(void*p)
+{
+  hts.init();
+  hts.addTask(task_imu);
+  hts.enableAll();
+
   for(;;)
   {
-    
-    switch(cycle)
-    {
-      case 0:
-        // getIMUBolderInterrupt();
-        // delay(0.1 * 1000); 
-        // portYIELD();
-        cycle++;
-      break;
-
-      case 1:
-        write_log(&local_lat, &local_lng);
-        cycle++;
-      break;
-
-      case 2:
-        task_loop_baro_HP206C(0);
-        cycle++;
-      break;
-
-      case 3:
-        updateScreen(local_lat, local_lng, &g_baro_latest);
-        cycle++;
-      break;
-
-      case 4:
-        cycle = 0;
-      break;
-    }
-
-    uint64_t diff = millis() - lastTime; 
-    // Serial.printf("\nLast task_update_screen : %u ms ago\n", diff);
-    lastTime = millis(); 
+    hts.execute();
     vTaskDelay(2);
   }
-  vTaskDelete( NULL );
 }
-
 
 void showVoltage()
 {
@@ -779,10 +802,6 @@ void wifi_scan()
 }
 
 
-void mpu_imu_task(void* param) 
-{
-  MPU_20948::imu_task(param);
-}
 
 
 void setup()
@@ -857,63 +876,23 @@ void setup()
   delay(5000); 
 
  
-
-  
-  xTaskCreatePinnedToCore(
-                      Task_GPS_loop,   /* Task function. */
-                      "Task1GPS",     /* name of task. */
-                      5000,       /* Stack size of task */
-                      NULL,        /* parameter of the task */
-                      2,           /* priority of the task */
-                      TaskGPS1,      /* Task handle to keep track of created task */
-                      0);          /* pin task to core 0 */     
-
-  // xTaskCreatePinnedToCore(
-  //                     task_loop_baro_HP206C,   /* Task function. */
-  //                     "Task2Baro",     /* name of task. */
-  //                     5000,       /* Stack size of task */
-  //                     NULL,        /* parameter of the task */
-  //                     2,           /* priority of the task */
-  //                     &TaskBaro2,      /* Task handle to keep track of created task */
-  //                     1);          /* pin task to core 1 */
-
-  xTaskCreatePinnedToCore(
-                    task_update_screen,   /* Task function. */
-                    "Task3Screen",     /* name of task. */
-                    10000,       /* Stack size of task */
-                    NULL,        /* parameter of the task */
-                    3,           /* priority of the task */
-                    &Task3,      /* Task handle to keep track of created task */
-                    1);          /* pin task to core 1 */
+// Prepare task runner
+  runner.init();
+  runner.addTask(task_handle_gps);
+  runner.addTask(task_handle_update_screen);
+  runner.addTask(task_handle_baro);
+  runner.addTask(task_handle_log);
 
 
-  // xTaskCreatePinnedToCore(
-  //                 mpu_imu_task,   /* Task function. */
-  //                 "Task4IMU",     /* name of task. */
-  //                 10000,       /* Stack size of task */
-  //                 NULL,        /* parameter of the task */
-  //                 2,           /* priority of the task */
-  //                 &TaskEstimator4  ,   /* Task handle to keep track of created task */
-  //                 1);          /* pin task to core 1 */
+
+  // runner.setHighPriorityScheduler(&hts);
+  runner.enableAll();
+
+  xTaskCreatePinnedToCore(&Task_core0, "task_core0", 5000, nullptr, 1, &Task1_core0, 0);
 }
 
 void loop()
 {
-    
-    // i2c_scanner();
-    // loop_baro_HP206C();
-    // getCurrentGPSInfo();
-
-
-    // if (btnCick) {
-      // showVoltage();
-     
-      // showBaro();
-//        showTFTMessage(current_gps_info);
-//        Serial.println(current_gps_info);
-      // This sketch displays information every time a new sentence is correctly encoded.
-     
-    // }
-    // button_loop();
-   
+  // Serial.println("loop");
+  runner.execute();
 }
